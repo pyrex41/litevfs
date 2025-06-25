@@ -1,0 +1,53 @@
+# DistSQLite Configuration Example
+# This file shows how to configure DistSQLite for distributed SQLite operations
+
+# Node identification
+hostname: "node-1"
+advertise-url: "http://node-1.example.com:8080"
+
+# Data storage
+data-dir: "/var/lib/distsqlite"
+
+# HTTP API server
+http-addr: ":8080"
+
+# Consul coordination
+consul-url: "http://consul.example.com:8500"
+lease-key: "distsqlite/primary"
+
+# Replication targets
+targets:
+  - "node-2.example.com"
+  - "node-3.example.com"
+
+# Replication settings
+replication:
+  # Threshold for switching to bulk sync (in bytes)
+  bulk-threshold: 1048576  # 1MB
+  
+  # Maximum delay before forcing replication
+  max-delay: "5s"
+  
+  # sqlite3_rsync settings
+  rsync:
+    compression: "zstd"
+    bandwidth-limit: "100M"
+    timeout: "30m"
+    max-retries: 3
+
+# Lease management
+lease:
+  ttl: "10s"
+  lock-delay: "1s"
+  
+# Logging
+logging:
+  level: "info"
+  format: "json"  # or "text"
+
+# Example usage:
+# 1. Start Consul cluster
+# 2. Start DistSQLite on each node:
+#    distsqlite --config distsqlite.yml
+# 3. Run any SQLite application with injection:
+#    LD_PRELOAD=./distsqlite-inject.so your-app
