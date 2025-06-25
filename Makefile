@@ -17,6 +17,11 @@ all: build
 deps:
 	@echo "Installing dependencies..."
 	./fetch_sqlite_binaries.sh
+	@echo "Checking for SQLite development headers..."
+	@if ! pkg-config --exists sqlite3; then \
+		echo "SQLite development headers not found. Installing..."; \
+		sudo apt-get update && sudo apt-get install -y libsqlite3-dev; \
+	fi
 	go mod init distsqlite 2>/dev/null || true
 	go mod tidy
 
