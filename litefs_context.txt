@@ -1,0 +1,1032 @@
+This file is a merged representation of a subset of the codebase, containing specifically included files, combined into a single document by Repomix.
+
+================================================================
+File Summary
+================================================================
+
+Purpose:
+--------
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+
+File Format:
+------------
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Multiple file entries, each consisting of:
+  a. A separator line (================)
+  b. The file path (File: path/to/file)
+  c. Another separator line
+  d. The full contents of the file
+  e. A blank line
+
+Usage Guidelines:
+-----------------
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+
+Notes:
+------
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: **/config.go, **/consul.go, **/lease.go
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+
+Additional Info:
+----------------
+
+================================================================
+Directory Structure
+================================================================
+cmd/
+  litefs/
+    config.go
+consul/
+  consul.go
+mock/
+  lease.go
+lease.go
+
+================================================================
+Files
+================================================================
+
+================
+File: cmd/litefs/config.go
+================
+package main
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"os"
+	"os/user"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/superfly/litefs"
+	"github.com/superfly/litefs/http"
+	"gopkg.in/yaml.v3"
+)
+
+const (
+	DefaultDataDir = "/var/lib/litefs"
+	DefaultFUSEDir = "/litefs"
+)
+
+// NOTE: Update etc/litefs.yml configuration file after changing the structure below.
+
+// Config represents a configuration for the binary process.
+type Config struct {
+	ExitOnError  bool `yaml:"exit-on-error"`
+	SkipSync     bool `yaml:"skip-sync"`
+	StrictVerify bool `yaml:"strict-verify"`
+
+	Exec ExecConfigSlice `yaml:"exec"`
+
+	Data    DataConfig    `yaml:"data"`
+	FUSE    FUSEConfig    `yaml:"fuse"`
+	HTTP    HTTPConfig    `yaml:"http"`
+	Proxy   ProxyConfig   `yaml:"proxy"`
+	Lease   LeaseConfig   `yaml:"lease"`
+	Backup  BackupConfig  `yaml:"backup"`
+	Log     LogConfig     `yaml:"log"`
+	Tracing TracingConfig `yaml:"tracing"`
+}
+
+// NewConfig returns a new instance of Config with defaults set.
+func NewConfig() Config {
+	var config Config
+	config.ExitOnError = true
+
+	config.Data.Dir = DefaultDataDir
+	config.Data.Compress = true
+	config.Data.Retention = litefs.DefaultRetention
+	config.Data.RetentionMonitorInterval = litefs.DefaultRetentionMonitorInterval
+
+	config.FUSE.Dir = DefaultFUSEDir
+
+	config.HTTP.Addr = http.DefaultAddr
+
+	config.Lease.Candidate = true
+	config.Lease.ReconnectDelay = litefs.DefaultReconnectDelay
+	config.Lease.DemoteDelay = litefs.DefaultDemoteDelay
+
+	config.Backup.Delay = litefs.DefaultBackupDelay
+	config.Backup.FullSyncInterval = litefs.DefaultBackupFullSyncInterval
+
+	config.Log.Format = "text"
+
+	config.Proxy.MaxLag = http.DefaultMaxLag
+	config.Proxy.PrimaryRedirectTimeout = http.DefaultPrimaryRedirectTimeout
+	config.Proxy.ReadTimeout = http.DefaultReadTimeout
+	config.Proxy.ReadHeaderTimeout = http.DefaultReadHeaderTimeout
+	config.Proxy.WriteTimeout = http.DefaultWriteTimeout
+	config.Proxy.IdleTimeout = http.DefaultIdleTimeout
+
+	config.Tracing.Enabled = true
+	config.Tracing.MaxSize = DefaultTracingMaxSize
+	config.Tracing.MaxCount = DefaultTracingMaxCount
+	config.Tracing.Compress = DefaultTracingCompress
+
+	return config
+}
+
+// ExecConfigSlice represents a wrapper type for handling YAML marshaling.
+type ExecConfigSlice []*ExecConfig
+
+func (a *ExecConfigSlice) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Tag {
+	case "!!str":
+		*a = ExecConfigSlice{{Cmd: value.Value}}
+		return nil
+	case "!!seq":
+		return value.Decode((*[]*ExecConfig)(a))
+	default:
+		return fmt.Errorf("invalid exec config format")
+	}
+}
+
+// ExecConfig represents a single exec command.
+type ExecConfig struct {
+	Cmd         string `yaml:"cmd"`
+	IfCandidate bool   `yaml:"if-candidate"`
+}
+
+// DataConfig represents the configuration for internal LiteFS data. This
+// includes database files as well as LTX transaction files.
+type DataConfig struct {
+	Dir      string `yaml:"dir"`
+	Compress bool   `yaml:"compress"`
+
+	Retention                time.Duration `yaml:"retention"`
+	RetentionMonitorInterval time.Duration `yaml:"retention-monitor-interval"`
+}
+
+// FUSEConfig represents the configuration for the FUSE file system.
+type FUSEConfig struct {
+	Dir        string `yaml:"dir"`
+	AllowOther bool   `yaml:"allow-other"`
+	Debug      bool   `yaml:"debug"`
+}
+
+// HTTPConfig represents the configuration for the HTTP server.
+type HTTPConfig struct {
+	Addr            string        `yaml:"addr"`
+	SnapshotTimeout time.Duration `yaml:"snapshot-timeout"`
+}
+
+// ProxyConfig represents the configuration for the HTTP proxy server.
+type ProxyConfig struct {
+	Addr                   string        `yaml:"addr"`
+	Target                 string        `yaml:"target"`
+	DB                     string        `yaml:"db"`
+	MaxLag                 time.Duration `yaml:"max-lag"`
+	Debug                  bool          `yaml:"debug"`
+	Passthrough            []string      `yaml:"passthrough"`
+	AlwaysForward          []string      `yaml:"always-forward"`
+	PrimaryRedirectTimeout time.Duration `yaml:"primary-redirect-timeout"`
+
+	ReadTimeout       time.Duration `yaml:"read-timeout"`
+	ReadHeaderTimeout time.Duration `yaml:"read-header-timeout"`
+	WriteTimeout      time.Duration `yaml:"write-timeout"`
+	IdleTimeout       time.Duration `yaml:"idle-timeout"`
+}
+
+// LeaseConfig represents a generic configuration for all lease types.
+type LeaseConfig struct {
+	// Specifies the type of leasing to use: "consul" or "static"
+	Type string `yaml:"type"`
+
+	// The hostname of this node. Used by the application to forward requests.
+	Hostname string `yaml:"hostname"`
+
+	// URL for other nodes to access this node's API.
+	AdvertiseURL string `yaml:"advertise-url"`
+
+	// Specifies if this node can become primary. Defaults to true.
+	//
+	// If using a "static" lease, setting this to true makes it the primary.
+	// Replicas in a state lease should set this to false.
+	Candidate bool `yaml:"candidate"`
+
+	// If true & node is a candidate, it will attempt to promote itself
+	// automatically once it connects to the cluster and syncs.
+	Promote bool `yaml:"promote"`
+
+	// After disconnect, time before node tries to reconnect to primary or
+	// becomes primary itself.
+	ReconnectDelay time.Duration `yaml:"reconnect-delay"`
+
+	// Amount of time to wait after a forced demotion before attempting to
+	// become primary again.
+	DemoteDelay time.Duration `yaml:"demote-delay"`
+
+	// Specifies a subset of databases to replica.
+	Databases []string `yaml:"databases"`
+
+	// Consul lease settings.
+	Consul struct {
+		URL       string        `yaml:"url"`
+		Key       string        `yaml:"key"`
+		TTL       time.Duration `yaml:"ttl"`
+		LockDelay time.Duration `yaml:"lock-delay"`
+	} `yaml:"consul"`
+}
+
+// BackupConfig represents a config for backup services.
+type BackupConfig struct {
+	Type             string        `yaml:"type"`
+	Path             string        `yaml:"path"`       // "file" only
+	URL              string        `yaml:"url"`        // "litefs-cloud" only
+	Cluster          string        `yaml:"cluster"`    // "litefs-cloud" only
+	AuthToken        string        `yaml:"auth-token"` // "litefs-cloud" only
+	Delay            time.Duration `yaml:"-"`
+	FullSyncInterval time.Duration `yaml:"-"`
+}
+
+// LogConfig represents the configuration for logging.
+type LogConfig struct {
+	Format    string `yaml:"format"`    // "text", "json"
+	Timestamp bool   `yaml:"timestamp"` // include timestamp in log output
+	Debug     bool   `yaml:"debug"`     // include debug logging
+}
+
+// Tracing configuration defaults.
+const (
+	DefaultTracingMaxSize  = 64 // MB
+	DefaultTracingMaxCount = 8
+	DefaultTracingCompress = true
+)
+
+// TracingConfig represents the configuration the on-disk trace log.
+type TracingConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Path     string `yaml:"path"`
+	MaxSize  int    `yaml:"max-size"`
+	MaxCount int    `yaml:"max-count"`
+	Compress bool   `yaml:"compress"`
+}
+
+// UnmarshalConfig unmarshals config from data.
+// If expandEnv is true then environment variables are expanded in the config.
+func UnmarshalConfig(config *Config, data []byte, expandEnv bool) error {
+	// Expand environment variables, if enabled.
+	if expandEnv {
+		data = []byte(ExpandEnv(string(data)))
+	}
+
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true) // strict checking
+	if err := dec.Decode(&config); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ExpandEnv replaces environment variables just like os.ExpandEnv() but also
+// allows for equality/inequality binary expressions within the ${} form.
+func ExpandEnv(s string) string {
+	return os.Expand(s, func(v string) string {
+		v = strings.TrimSpace(v)
+
+		if a := expandExprSingleQuote.FindStringSubmatch(v); a != nil {
+			if a[2] == "==" {
+				return strconv.FormatBool(os.Getenv(a[1]) == a[3])
+			}
+			return strconv.FormatBool(os.Getenv(a[1]) != a[3])
+		}
+
+		if a := expandExprDoubleQuote.FindStringSubmatch(v); a != nil {
+			if a[2] == "==" {
+				return strconv.FormatBool(os.Getenv(a[1]) == a[3])
+			}
+			return strconv.FormatBool(os.Getenv(a[1]) != a[3])
+		}
+
+		if a := expandExprVar.FindStringSubmatch(v); a != nil {
+			if a[2] == "==" {
+				return strconv.FormatBool(os.Getenv(a[1]) == os.Getenv(a[3]))
+			}
+			return strconv.FormatBool(os.Getenv(a[1]) != os.Getenv(a[3]))
+		}
+
+		return os.Getenv(v)
+	})
+}
+
+var (
+	expandExprSingleQuote = regexp.MustCompile(`^(\w+)\s*(==|!=)\s*'(.*)'$`)
+	expandExprDoubleQuote = regexp.MustCompile(`^(\w+)\s*(==|!=)\s*"(.*)"$`)
+	expandExprVar         = regexp.MustCompile(`^(\w+)\s*(==|!=)\s*(\w+)$`)
+)
+
+// splitArgs returns the list of args before and after a "--" arg. If the double
+// dash is not specified, then args0 is args and args1 is empty.
+func splitArgs(args []string) (args0, args1 []string) {
+	for i, v := range args {
+		if v == "--" {
+			return args[:i], args[i+1:]
+		}
+	}
+	return args, nil
+}
+
+// ParseConfigPath parses the configuration file from configPath, if specified.
+// Returns ok true if a configuration file was successfully found.
+//
+// Otherwise searches the standard list of search paths. Returns an error if
+// no configuration files could be found.
+func ParseConfigPath(ctx context.Context, configPath string, expandEnv bool, config *Config) (err error) {
+	// Only read from explicit path, if specified. Report any error.
+	if configPath != "" {
+		// Read configuration.
+		buf, err := os.ReadFile(configPath)
+		if err != nil {
+			return err
+		}
+		return UnmarshalConfig(config, buf, expandEnv)
+	}
+
+	// Otherwise attempt to read each config path until we succeed.
+	for _, path := range configSearchPaths() {
+		if path, err = filepath.Abs(path); err != nil {
+			return err
+		}
+
+		buf, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return fmt.Errorf("cannot read config file at %s: %s", path, err)
+		}
+
+		if err := UnmarshalConfig(config, buf, expandEnv); err != nil {
+			return fmt.Errorf("cannot unmarshal config file at %s: %s", path, err)
+		}
+
+		fmt.Printf("config file read from %s\n", path)
+		return nil
+	}
+
+	return fmt.Errorf("config file not found")
+}
+
+// configSearchPaths returns paths to search for the config file. It starts with
+// the current directory, then home directory, if available. And finally it tries
+// to read from the /etc directory.
+func configSearchPaths() []string {
+	a := []string{"litefs.yml"}
+	if u, _ := user.Current(); u != nil && u.HomeDir != "" {
+		a = append(a, filepath.Join(u.HomeDir, "litefs.yml"))
+	}
+	a = append(a, "/etc/litefs.yml")
+	return a
+}
+
+================
+File: consul/consul.go
+================
+package consul
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/url"
+	"path"
+	"strings"
+	"time"
+
+	"github.com/hashicorp/consul/api"
+	"github.com/superfly/litefs"
+)
+
+// Default lease settings.
+const (
+	DefaultSessionName = "litefs"
+	DefaultTTL         = 10 * time.Second
+	DefaultLockDelay   = 1 * time.Second
+)
+
+// Leaser represents an API for obtaining a distributed lock on a single key.
+type Leaser struct {
+	consulURL    string
+	hostname     string
+	advertiseURL string
+	client       *api.Client
+
+	// SessionName is the name associated with the Consul session.
+	SessionName string
+
+	// Key is the Consul KV key use to acquire the lock.
+	Key string
+
+	// Prefix that is prepended to the key. Automatically set if the URL contains a path.
+	KeyPrefix string
+
+	// TTL is the time until the lease expires.
+	TTL time.Duration
+
+	// LockDefault is the time after the lock expires that a new lock can be acquired.
+	LockDelay time.Duration
+}
+
+// NewLeaser returns a new instance of Leaser.
+func NewLeaser(consulURL, key, hostname, advertiseURL string) *Leaser {
+	return &Leaser{
+		consulURL:    consulURL,
+		hostname:     hostname,
+		advertiseURL: advertiseURL,
+		SessionName:  DefaultSessionName,
+		Key:          key,
+		TTL:          DefaultTTL,
+		LockDelay:    DefaultLockDelay,
+	}
+}
+
+// Open initializes the Consul client.
+func (l *Leaser) Open() error {
+	u, err := url.Parse(l.consulURL)
+	if err != nil {
+		return err
+	}
+
+	if l.Key == "" {
+		return fmt.Errorf("must specify a consul key")
+	} else if l.hostname == "" {
+		return fmt.Errorf("must specify a hostname for this node")
+	} else if l.advertiseURL == "" {
+		return fmt.Errorf("must specify an advertise URL for this node")
+	}
+
+	config := api.DefaultConfig()
+	config.HttpClient = http.DefaultClient
+	config.Address = u.Host
+	config.Scheme = u.Scheme
+	if u.User != nil {
+		config.Token, _ = u.User.Password()
+	}
+	if v := strings.TrimPrefix(u.Path, "/"); v != "" {
+		l.KeyPrefix = v
+	}
+
+	if l.client, err = api.NewClient(config); err != nil {
+		return err
+	}
+
+	// Register a node that is shared by all instances.
+	if nodeName := l.NodeName(); nodeName != "" {
+		if _, err := l.client.Catalog().Register(&api.CatalogRegistration{
+			Node:    nodeName,
+			Address: "localhost", // not used
+		}, nil); err != nil {
+			return fmt.Errorf("register node %q: %w", nodeName, err)
+		}
+	}
+
+	return nil
+}
+
+// Close closes the underlying client.
+func (l *Leaser) Close() (err error) {
+	return nil
+}
+
+// Type returns "consul".
+func (l *Leaser) Type() string { return "consul" }
+
+// Hostname returns the hostname for this node.
+func (l *Leaser) Hostname() string {
+	return l.hostname
+}
+
+// AdvertiseURL returns the URL being advertised to nodes when primary.
+func (l *Leaser) AdvertiseURL() string {
+	return l.advertiseURL
+}
+
+// NodeName returns a name for a node based on the key prefix.
+func (l *Leaser) NodeName() string {
+	if l.KeyPrefix == "" {
+		return ""
+	}
+	return path.Join(l.KeyPrefix, "litefs")
+}
+
+func (l *Leaser) kvKey() string {
+	return path.Join(l.KeyPrefix, l.Key)
+}
+
+func (l *Leaser) kvValue() ([]byte, error) {
+	return json.Marshal(litefs.PrimaryInfo{
+		Hostname:     l.hostname,
+		AdvertiseURL: l.advertiseURL,
+	})
+}
+
+// Acquire acquires a lock on the key and sets the value.
+// Returns an error if the lease could not be obtained.
+func (l *Leaser) Acquire(ctx context.Context) (_ litefs.Lease, retErr error) {
+	// Create session first.
+	sessionID, _, err := l.client.Session().CreateNoChecks(&api.SessionEntry{
+		Node:      l.NodeName(),
+		Name:      l.SessionName,
+		Behavior:  "delete",
+		LockDelay: l.LockDelay,
+		TTL:       l.TTL.String(),
+	}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create consul session: %w", err)
+	}
+	lease := newLease(l, sessionID, time.Now())
+
+	// Attempt to clean up session. It'll be removed via TTL eventually anyway though.
+	defer func() {
+		if retErr != nil {
+			_ = lease.Close()
+		}
+	}()
+
+	// Marshal information about the primary node.
+	kvValue, err := l.kvValue()
+	if err != nil {
+		return nil, fmt.Errorf("marshal lease info: %w", err)
+	}
+
+	// Set key with lock on session.
+	kvKey := path.Join(l.KeyPrefix, l.Key)
+	acquired, _, err := l.client.KV().Acquire(&api.KVPair{
+		Key:     kvKey,
+		Value:   kvValue,
+		Session: sessionID,
+	}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("put consul key/value: %w", err)
+	} else if !acquired {
+		return nil, litefs.ErrPrimaryExists
+	}
+	return lease, nil
+}
+
+// AcquireExisting acquires a lock using an existing session ID. This can occur
+// if an existing primary hands off to a replica. Returns an error if the lease
+// could not be renewed.
+func (l *Leaser) AcquireExisting(ctx context.Context, leaseID string) (litefs.Lease, error) {
+	lease := newLease(l, leaseID, time.Now())
+	if err := lease.Renew(ctx); err != nil {
+		return nil, err
+	}
+
+	// Marshal information about the primary node.
+	kvValue, err := l.kvValue()
+	if err != nil {
+		return nil, fmt.Errorf("marshal lease info: %w", err)
+	}
+
+	// Set key with lock on session.
+	kvKey := path.Join(l.KeyPrefix, l.Key)
+	acquired, _, err := l.client.KV().Acquire(&api.KVPair{
+		Key:     kvKey,
+		Value:   kvValue,
+		Session: leaseID,
+	}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("replace consul key/value: %w", err)
+	} else if !acquired {
+		return nil, litefs.ErrPrimaryExists
+	}
+	return lease, nil
+}
+
+// PrimaryInfo attempts to return the current primary URL.
+func (l *Leaser) PrimaryInfo(ctx context.Context) (info litefs.PrimaryInfo, err error) {
+	kv, _, err := l.client.KV().Get(path.Join(l.KeyPrefix, l.Key), nil)
+	if err != nil {
+		return info, err
+	} else if kv == nil || len(kv.Value) == 0 {
+		return info, litefs.ErrNoPrimary
+	}
+
+	if err := json.Unmarshal(kv.Value, &info); err != nil {
+		return info, err
+	}
+	return info, nil
+}
+
+// ClusterIDKey returns the key used to store the cluster ID.
+func (l *Leaser) ClusterIDKey() string {
+	return path.Join(l.KeyPrefix, l.Key, "clusterid")
+}
+
+// ClusterID returns the current cluster ID from Consul.
+// Returns a blank string if no cluster ID has been set yet.
+func (l *Leaser) ClusterID(ctx context.Context) (string, error) {
+	kv, _, err := l.client.KV().Get(l.ClusterIDKey(), nil)
+	if err != nil {
+		return "", err
+	} else if kv == nil {
+		return "", nil
+	}
+	return string(kv.Value), nil
+}
+
+// SetClusterID sets the cluster ID on Consul. The cluster ID can only be set
+// once and it will return an error if attemping to reassign the cluster ID.
+func (l *Leaser) SetClusterID(ctx context.Context, clusterID string) error {
+	// Ensure cluster ID has not already been set.
+	//
+	// NOTE: AFAICT, the Consul client doesn't seem to allow CAS operations on
+	// non-existent keys. We could initialize the key to an initializing value
+	// and then replace that, however, this is not a frequent operation so a
+	// race is unlikely.
+	if currentClusterID, err := l.ClusterID(ctx); err != nil {
+		return err
+	} else if currentClusterID != "" {
+		return fmt.Errorf("cluster already initialized, cannot set cluster id")
+	}
+
+	// Set our cluster ID. Once set, it can't change.
+	if _, err := l.client.KV().Put(&api.KVPair{
+		Key:   l.ClusterIDKey(),
+		Value: []byte(clusterID),
+	}, nil); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Lease represents a distributed lock obtained by the Leaser.
+type Lease struct {
+	leaser    *Leaser
+	sessionID string
+	renewedAt time.Time
+	handoffCh chan uint64 // channel of node IDs
+}
+
+func newLease(leaser *Leaser, sessionID string, renewedAt time.Time) *Lease {
+	return &Lease{
+		leaser:    leaser,
+		sessionID: sessionID,
+		renewedAt: renewedAt,
+		handoffCh: make(chan uint64),
+	}
+}
+
+// ID returns the lease session ID.
+func (l *Lease) ID() string { return l.sessionID }
+
+// TTL returns the time-to-live value the lease was initialized with.
+func (l *Lease) TTL() time.Duration { return l.leaser.TTL }
+
+// RenewedAt returns the time that the lease was created or renewed.
+func (l *Lease) RenewedAt() time.Time { return l.renewedAt }
+
+// Renew attempts to reset the TTL on the lease by renewing it.
+// Returns ErrLeaseExpired if lease no longer exists.
+func (l *Lease) Renew(ctx context.Context) error {
+	entry, _, err := l.leaser.client.Session().Renew(l.sessionID, nil)
+	if err != nil {
+		return err
+	} else if entry == nil {
+		return litefs.ErrLeaseExpired
+	}
+
+	// Reset the last renewed time.
+	l.renewedAt = time.Now()
+	return nil
+}
+
+// Handoff sends the nodeID to the channel returned by HandoffCh()
+func (l *Lease) Handoff(ctx context.Context, nodeID uint64) error {
+	ctx, cancel := context.WithTimeoutCause(ctx, 5*time.Second, fmt.Errorf("consul handoff timeout"))
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case l.handoffCh <- nodeID:
+		return nil
+	}
+}
+
+// HandoffCh returns the handoff channel.
+func (l *Lease) HandoffCh() <-chan uint64 { return l.handoffCh }
+
+// Close destroys the underlying session.
+func (l *Lease) Close() error {
+	// Attempt to remove key before destroying session.
+	kvKey := l.leaser.kvKey()
+	if ok, _, err := l.leaser.client.KV().Release(&api.KVPair{
+		Key:     kvKey,
+		Session: l.sessionID,
+	}, nil); err != nil {
+		log.Printf("consul key release error: key=%s session=%s", kvKey, l.sessionID)
+	} else if !ok {
+		log.Printf("cannot release consul key: key=%s session=%s", kvKey, l.sessionID)
+	}
+
+	_, err := l.leaser.client.Session().Destroy(l.sessionID, nil)
+	return err
+}
+
+================
+File: mock/lease.go
+================
+package mock
+
+import (
+	"context"
+	"time"
+
+	"github.com/superfly/litefs"
+)
+
+var _ litefs.Leaser = (*Leaser)(nil)
+
+type Leaser struct {
+	CloseFunc           func() error
+	HostnameFunc        func() string
+	AdvertiseURLFunc    func() string
+	AcquireFunc         func(ctx context.Context) (litefs.Lease, error)
+	AcquireExistingFunc func(ctx context.Context, leaseID string) (litefs.Lease, error)
+	PrimaryInfoFunc     func(ctx context.Context) (litefs.PrimaryInfo, error)
+	ClusterIDFunc       func(ctx context.Context) (string, error)
+	SetClusterIDFunc    func(ctx context.Context, clusterID string) error
+}
+
+func (l *Leaser) Close() error {
+	return l.CloseFunc()
+}
+
+func (l *Leaser) Type() string { return "mock" }
+
+func (l *Leaser) Hostname() string {
+	return l.HostnameFunc()
+}
+
+func (l *Leaser) AdvertiseURL() string {
+	return l.AdvertiseURLFunc()
+}
+
+func (l *Leaser) Acquire(ctx context.Context) (litefs.Lease, error) {
+	return l.AcquireFunc(ctx)
+}
+
+func (l *Leaser) AcquireExisting(ctx context.Context, leaseID string) (litefs.Lease, error) {
+	return l.AcquireExistingFunc(ctx, leaseID)
+}
+
+func (l *Leaser) PrimaryInfo(ctx context.Context) (litefs.PrimaryInfo, error) {
+	return l.PrimaryInfoFunc(ctx)
+}
+
+func (l *Leaser) ClusterID(ctx context.Context) (string, error) {
+	return l.ClusterIDFunc(ctx)
+}
+
+func (l *Leaser) SetClusterID(ctx context.Context, clusterID string) error {
+	return l.SetClusterIDFunc(ctx, clusterID)
+}
+
+var _ litefs.Lease = (*Lease)(nil)
+
+type Lease struct {
+	IDFunc        func() string
+	RenewedAtFunc func() time.Time
+	TTLFunc       func() time.Duration
+	RenewFunc     func(ctx context.Context) error
+	HandoffFunc   func(ctx context.Context, nodeID uint64) error
+	HandoffChFunc func() <-chan uint64
+	CloseFunc     func() error
+}
+
+func (l *Lease) ID() string {
+	return l.IDFunc()
+}
+
+func (l *Lease) RenewedAt() time.Time {
+	return l.RenewedAtFunc()
+}
+
+func (l *Lease) TTL() time.Duration {
+	return l.TTLFunc()
+}
+
+func (l *Lease) Renew(ctx context.Context) error {
+	return l.RenewFunc(ctx)
+}
+
+func (l *Lease) Handoff(ctx context.Context, nodeID uint64) error {
+	return l.HandoffFunc(ctx, nodeID)
+}
+
+func (l *Lease) HandoffCh() <-chan uint64 {
+	return l.HandoffChFunc()
+}
+
+func (l *Lease) Close() error {
+	return l.CloseFunc()
+}
+
+================
+File: lease.go
+================
+package litefs
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"time"
+)
+
+// Leaser represents an API for obtaining a lease for leader election.
+type Leaser interface {
+	io.Closer
+
+	// Type returns the name of the leaser.
+	Type() string
+
+	Hostname() string
+	AdvertiseURL() string
+
+	// Acquire attempts to acquire the lease to become the primary.
+	Acquire(ctx context.Context) (Lease, error)
+
+	// AcquireExisting returns a lease from an existing lease ID.
+	// This occurs when the primary is handed off to a replica node.
+	AcquireExisting(ctx context.Context, leaseID string) (Lease, error)
+
+	// PrimaryInfo attempts to read the current primary data.
+	// Returns ErrNoPrimary if no primary currently has the lease.
+	PrimaryInfo(ctx context.Context) (PrimaryInfo, error)
+
+	// ClusterID returns the cluster ID set on the leaser.
+	// This is used to ensure two clusters do not accidentally overlap.
+	ClusterID(ctx context.Context) (string, error)
+
+	// SetClusterID sets the cluster ID on the leaser.
+	SetClusterID(ctx context.Context, clusterID string) error
+}
+
+// Lease represents an acquired lease from a Leaser.
+type Lease interface {
+	ID() string
+	RenewedAt() time.Time
+	TTL() time.Duration
+
+	// Renew attempts to reset the TTL on the lease.
+	// Returns ErrLeaseExpired if the lease has expired or was deleted.
+	Renew(ctx context.Context) error
+
+	// Marks the lease as handed-off to another node.
+	// This should send the nodeID to the channel returned by HandoffCh().
+	Handoff(ctx context.Context, nodeID uint64) error
+	HandoffCh() <-chan uint64
+
+	// Close attempts to remove the lease from the server.
+	Close() error
+}
+
+// PrimaryInfo is the JSON object stored in the Consul lease value.
+type PrimaryInfo struct {
+	Hostname     string `json:"hostname"`
+	AdvertiseURL string `json:"advertise-url"`
+}
+
+// Clone returns a copy of info.
+func (info *PrimaryInfo) Clone() *PrimaryInfo {
+	if info == nil {
+		return nil
+	}
+	other := *info
+	return &other
+}
+
+// StaticLeaser always returns a lease to a static primary.
+type StaticLeaser struct {
+	isPrimary    bool
+	hostname     string
+	advertiseURL string
+}
+
+// NewStaticLeaser returns a new instance of StaticLeaser.
+func NewStaticLeaser(isPrimary bool, hostname, advertiseURL string) *StaticLeaser {
+	return &StaticLeaser{
+		isPrimary:    isPrimary,
+		hostname:     hostname,
+		advertiseURL: advertiseURL,
+	}
+}
+
+// Close is a no-op.
+func (l *StaticLeaser) Close() (err error) { return nil }
+
+// Type returns "static".
+func (l *StaticLeaser) Type() string { return "static" }
+
+func (l *StaticLeaser) Hostname() string {
+	return l.hostname
+}
+
+// AdvertiseURL returns the primary URL if this is the primary.
+// Otherwise returns blank.
+func (l *StaticLeaser) AdvertiseURL() string {
+	if l.isPrimary {
+		return l.advertiseURL
+	}
+	return ""
+}
+
+// Acquire returns a lease if this node is the static primary.
+// Otherwise returns ErrPrimaryExists.
+func (l *StaticLeaser) Acquire(ctx context.Context) (Lease, error) {
+	if !l.isPrimary {
+		return nil, ErrPrimaryExists
+	}
+	return &StaticLease{leaser: l}, nil
+}
+
+// AcquireExisting always returns an error. Static leasing does not support handoff.
+func (l *StaticLeaser) AcquireExisting(ctx context.Context, leaseID string) (Lease, error) {
+	return nil, fmt.Errorf("static lease handoff not supported")
+}
+
+// PrimaryInfo returns the primary's info.
+// Returns ErrNoPrimary if the node is the primary.
+func (l *StaticLeaser) PrimaryInfo(ctx context.Context) (PrimaryInfo, error) {
+	if l.isPrimary {
+		return PrimaryInfo{}, ErrNoPrimary
+	}
+	return PrimaryInfo{
+		Hostname:     l.hostname,
+		AdvertiseURL: l.advertiseURL,
+	}, nil
+}
+
+// IsPrimary returns true if the current node is the primary.
+func (l *StaticLeaser) IsPrimary() bool {
+	return l.isPrimary
+}
+
+// ClusterID always returns a blank string for the static leaser.
+func (l *StaticLeaser) ClusterID(ctx context.Context) (string, error) {
+	return "", nil
+}
+
+// SetClusterID is always a no-op for the static leaser.
+func (l *StaticLeaser) SetClusterID(ctx context.Context, clusterID string) error {
+	return nil
+}
+
+var _ Lease = (*StaticLease)(nil)
+
+// StaticLease represents a lease for a fixed primary.
+type StaticLease struct {
+	leaser *StaticLeaser
+}
+
+// ID always returns a blank string.
+func (l *StaticLease) ID() string { return "" }
+
+// RenewedAt returns the Unix epoch in UTC.
+func (l *StaticLease) RenewedAt() time.Time { return time.Unix(0, 0).UTC() }
+
+// TTL returns the duration until the lease expires which is a time well into the future.
+func (l *StaticLease) TTL() time.Duration { return staticLeaseExpiresAt.Sub(l.RenewedAt()) }
+
+// Renew is a no-op.
+func (l *StaticLease) Renew(ctx context.Context) error { return nil }
+
+// Handoff always returns an error.
+func (l *StaticLease) Handoff(ctx context.Context, nodeID uint64) error {
+	return fmt.Errorf("static lease does not support handoff")
+}
+
+// HandoffCh always returns a nil channel.
+func (l *StaticLease) HandoffCh() <-chan uint64 { return nil }
+
+func (l *StaticLease) Close() error { return nil }
+
+var staticLeaseExpiresAt = time.Date(3000, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+
+
+================================================================
+End of Codebase
+================================================================
