@@ -15,10 +15,24 @@
 #include <time.h>
 
 // Shared memory IPC structures for communicating with Go sidecar
-#define SHM_KEY 0x44495354  // "DIST" in hex
+#define SHM_BASE_KEY 0x44495354  // "DIST" in hex - base key for derivation
 #define MAX_WRITE_EVENTS 1000
 #define MAX_PATH_LEN 512
 #define MAX_DATA_LEN 8192
+
+// Generate safe shared memory key to prevent conflicts and security issues
+static key_t generateSafeSharedMemoryKey(void) {
+    pid_t pid = getpid();
+    uid_t uid = getuid();
+    
+    // Combine base key with PID and UID to create unique, safe key
+    key_t key = SHM_BASE_KEY ^ (pid << 16) ^ (uid << 8);
+    
+    printf("[DistSQLite VFS] Generated safe shared memory key: 0x%x (PID: %d, UID: %d)\n", 
+           key, pid, uid);
+    
+    return key;
+}
 
 typedef struct {
     char path[MAX_PATH_LEN];
@@ -127,8 +141,9 @@ static int64_t getCurrentTimeNs(void) {
 
 // Initialize shared memory for IPC with Go sidecar
 static int initSharedMemory(DistVFS *pVfs) {
-    // Create or get shared memory segment
-    pVfs->shm_id = shmget(SHM_KEY, sizeof(SharedMemory), IPC_CREAT | 0666);
+    // Create or get shared memory segment with dynamic key
+    key_t shmKey = generateSafeSharedMemoryKey();
+    pVfs->shm_id = shmget(shmKey, sizeof(SharedMemory), IPC_CREAT | 0600); // Restrict permissions
     if (pVfs->shm_id == -1) {
         fprintf(stderr, "[DistSQLite VFS] Failed to create shared memory: %s\n", strerror(errno));
         return SQLITE_ERROR;
@@ -138,6 +153,8 @@ static int initSharedMemory(DistVFS *pVfs) {
     pVfs->shm = (SharedMemory*)shmat(pVfs->shm_id, NULL, 0);
     if (pVfs->shm == (void*)-1) {
         fprintf(stderr, "[DistSQLite VFS] Failed to attach to shared memory: %s\n", strerror(errno));
+        // Clean up shared memory segment on failure
+        shmctl(pVfs->shm_id, IPC_RMID, NULL);
         return SQLITE_ERROR;
     }
     
@@ -145,12 +162,23 @@ static int initSharedMemory(DistVFS *pVfs) {
     if (pVfs->shm->head == 0 && pVfs->shm->tail == 0) {
         printf("[DistSQLite VFS] Initializing shared memory IPC\n");
         
-        // Initialize semaphores
-        if (sem_init(&pVfs->shm->mutex, 1, 1) != 0 ||
-            sem_init(&pVfs->shm->producer_sem, 1, MAX_WRITE_EVENTS) != 0 ||
-            sem_init(&pVfs->shm->consumer_sem, 1, 0) != 0) {
-            fprintf(stderr, "[DistSQLite VFS] Failed to initialize semaphores: %s\n", strerror(errno));
-            return SQLITE_ERROR;
+        // Initialize semaphores with proper cleanup on failure
+        if (sem_init(&pVfs->shm->mutex, 1, 1) != 0) {
+            fprintf(stderr, "[DistSQLite VFS] Failed to initialize mutex semaphore: %s\n", strerror(errno));
+            goto cleanup_shm;
+        }
+        
+        if (sem_init(&pVfs->shm->producer_sem, 1, MAX_WRITE_EVENTS) != 0) {
+            fprintf(stderr, "[DistSQLite VFS] Failed to initialize producer semaphore: %s\n", strerror(errno));
+            sem_destroy(&pVfs->shm->mutex);
+            goto cleanup_shm;
+        }
+        
+        if (sem_init(&pVfs->shm->consumer_sem, 1, 0) != 0) {
+            fprintf(stderr, "[DistSQLite VFS] Failed to initialize consumer semaphore: %s\n", strerror(errno));
+            sem_destroy(&pVfs->shm->mutex);
+            sem_destroy(&pVfs->shm->producer_sem);
+            goto cleanup_shm;
         }
         
         pVfs->shm->head = 0;
@@ -159,6 +187,12 @@ static int initSharedMemory(DistVFS *pVfs) {
     }
     
     return SQLITE_OK;
+
+cleanup_shm:
+    shmdt(pVfs->shm);
+    shmctl(pVfs->shm_id, IPC_RMID, NULL);
+    pVfs->shm = NULL;
+    return SQLITE_ERROR;
 }
 
 // Send write event to Go sidecar via shared memory
@@ -283,6 +317,13 @@ static int distVfsOpen(sqlite3_vfs *pVfs, const char *zName, sqlite3_file *pFile
     DistFile *pDistFile = (DistFile*)pFile;
     int rc;
     
+    // Initialize our file structure first
+    memset(pDistFile, 0, sizeof(DistFile));
+    pDistFile->base.pMethods = &distIoMethods;
+    pDistFile->pVFS = pDistVfs;
+    pDistFile->writeCount = 0;
+    pDistFile->lastBatchTime = getCurrentTimeNs();
+    
     // Allocate space for the original file structure
     pDistFile->pOriginal = sqlite3_malloc(pDistVfs->pOriginal->szOsFile);
     if (!pDistFile->pOriginal) {
@@ -292,31 +333,33 @@ static int distVfsOpen(sqlite3_vfs *pVfs, const char *zName, sqlite3_file *pFile
     // Call original VFS open
     rc = pDistVfs->pOriginal->xOpen(pDistVfs->pOriginal, zName, pDistFile->pOriginal, flags, pOutFlags);
     if (rc != SQLITE_OK) {
+        // Clean up on failure to prevent memory leak
         sqlite3_free(pDistFile->pOriginal);
+        pDistFile->pOriginal = NULL;
         return rc;
     }
-    
-    // Initialize our file structure
-    pDistFile->base.pMethods = &distIoMethods;
-    pDistFile->pVFS = pDistVfs;
-    pDistFile->writeCount = 0;
-    pDistFile->lastBatchTime = getCurrentTimeNs();
     
     // Store database path and determine file type
     if (zName) {
         size_t len = strlen(zName);
         pDistFile->zPath = sqlite3_malloc(len + 1);
-        if (pDistFile->zPath) {
-            strcpy(pDistFile->zPath, zName);
-            
-            // Check if this is a WAL file
-            pDistFile->isWAL = (len > 4 && strcmp(zName + len - 4, "-wal") == 0);
-            
-            // Check if this is main database file (not WAL, not SHM, not journal)
-            pDistFile->isMain = !pDistFile->isWAL && 
-                              !(len > 4 && strcmp(zName + len - 4, "-shm") == 0) &&
-                              !(len > 8 && strcmp(zName + len - 8, "-journal") == 0);
+        if (!pDistFile->zPath) {
+            // Clean up on allocation failure
+            pDistFile->pOriginal->pMethods->xClose(pDistFile->pOriginal);
+            sqlite3_free(pDistFile->pOriginal);
+            pDistFile->pOriginal = NULL;
+            return SQLITE_NOMEM;
         }
+        
+        strcpy(pDistFile->zPath, zName);
+        
+        // Check if this is a WAL file
+        pDistFile->isWAL = (len > 4 && strcmp(zName + len - 4, "-wal") == 0);
+        
+        // Check if this is main database file (not WAL, not SHM, not journal)
+        pDistFile->isMain = !pDistFile->isWAL && 
+                          !(len > 4 && strcmp(zName + len - 4, "-shm") == 0) &&
+                          !(len > 8 && strcmp(zName + len - 8, "-journal") == 0);
     }
     
     return SQLITE_OK;
@@ -393,13 +436,17 @@ static int distFileClose(sqlite3_file *pFile) {
         notifyWriteEvent(pDistFile, -1, NULL, 0); // Special flush event
     }
     
+    // Clean up original file handle
     if (pDistFile->pOriginal) {
         rc = pDistFile->pOriginal->pMethods->xClose(pDistFile->pOriginal);
         sqlite3_free(pDistFile->pOriginal);
+        pDistFile->pOriginal = NULL;
     }
     
+    // Clean up path string
     if (pDistFile->zPath) {
         sqlite3_free(pDistFile->zPath);
+        pDistFile->zPath = NULL;
     }
     
     return rc;

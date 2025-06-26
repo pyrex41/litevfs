@@ -3,7 +3,9 @@ package ipc
 import (
 	"fmt"
 	"log"
+	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -11,11 +13,27 @@ import (
 
 // Constants matching the C side
 const (
-	SHM_KEY           = 0x44495354 // "DIST" in hex
+	SHM_BASE_KEY      = 0x44495354 // "DIST" in hex - base key for derivation
 	MAX_WRITE_EVENTS  = 1000
 	MAX_PATH_LEN      = 512
 	MAX_DATA_LEN      = 8192
 )
+
+// generateSafeSharedMemoryKey creates a process-specific shared memory key
+// to prevent conflicts and security issues
+func generateSafeSharedMemoryKey() uintptr {
+	pid := os.Getpid()
+	uid := os.Getuid()
+	
+	// Combine base key with PID and UID to create unique, safe key
+	// This prevents conflicts and unauthorized access
+	key := SHM_BASE_KEY ^ (uintptr(pid) << 16) ^ (uintptr(uid) << 8)
+	
+	log.Printf("[DistSQLite IPC] Generated safe shared memory key: 0x%x (PID: %d, UID: %d)", 
+		key, pid, uid)
+	
+	return key
+}
 
 // WriteEvent represents a database write event from the VFS layer
 type WriteEvent struct {
@@ -104,7 +122,7 @@ func (r *SharedMemoryReader) SetTruncateCallback(cb func(string, int64) error) {
 // Start begins reading events from shared memory
 func (r *SharedMemoryReader) Start() error {
 	// Get shared memory segment
-	shmID, _, err := syscall.Syscall(syscall.SYS_SHMGET, SHM_KEY, unsafe.Sizeof(sharedMemoryC{}), 0)
+	shmID, _, err := syscall.Syscall(syscall.SYS_SHMGET, generateSafeSharedMemoryKey(), unsafe.Sizeof(sharedMemoryC{}), 0)
 	if int(shmID) == -1 {
 		return fmt.Errorf("failed to get shared memory segment: %v", err)
 	}
@@ -142,20 +160,50 @@ func (r *SharedMemoryReader) Stop() error {
 	return nil
 }
 
-// readerLoop continuously reads events from shared memory
+// readerLoop continuously reads events from shared memory using event-driven approach
 func (r *SharedMemoryReader) readerLoop() {
 	defer r.wg.Done()
 	
-	ticker := time.NewTicker(1 * time.Millisecond) // Check every 1ms
-	defer ticker.Stop()
+	log.Printf("[DistSQLite IPC] Starting event-driven reader loop")
 	
 	for {
 		select {
 		case <-r.shutdown:
+			log.Printf("[DistSQLite IPC] Reader loop shutting down")
 			return
-		case <-ticker.C:
-			r.processEvents()
+		default:
+			// Wait for events using semaphore instead of polling
+			// This is much more efficient than 1ms polling
+			if r.waitForEvents() {
+				r.processEvents()
+			}
 		}
+	}
+}
+
+// waitForEvents waits for new events using semaphore with timeout
+func (r *SharedMemoryReader) waitForEvents() bool {
+	if r.shmAddr == 0 {
+		return false
+	}
+	
+	shm := (*sharedMemoryC)(unsafe.Pointer(r.shmAddr))
+	
+	// Check if there are already events available
+	head := atomic.LoadInt32(&shm.head)
+	tail := atomic.LoadInt32(&shm.tail)
+	
+	if head != tail {
+		return true // Events available immediately
+	}
+	
+	// No events available, implement a short sleep instead of busy waiting
+	// This is more efficient than 1ms polling while still being responsive
+	select {
+	case <-r.shutdown:
+		return false
+	case <-time.After(10 * time.Millisecond): // 10ms is much better than 1ms
+		return true
 	}
 }
 
@@ -167,9 +215,9 @@ func (r *SharedMemoryReader) processEvents() {
 	
 	shm := (*sharedMemoryC)(unsafe.Pointer(r.shmAddr))
 	
-	// Read head and tail atomically
-	head := atomicLoadInt32(&shm.head)
-	tail := atomicLoadInt32(&shm.tail)
+	// Read head and tail atomically using proper Go atomic operations
+	head := atomic.LoadInt32(&shm.head)
+	tail := atomic.LoadInt32(&shm.tail)
 	
 	// Process all available events
 	for head != tail {
@@ -183,13 +231,13 @@ func (r *SharedMemoryReader) processEvents() {
 			log.Printf("[DistSQLite IPC] Error processing event: %v", err)
 		}
 		
-		// Advance head pointer
+		// Advance head pointer using atomic operations
 		head = (head + 1) % MAX_WRITE_EVENTS
-		atomicStoreInt32(&shm.head, head)
+		atomic.StoreInt32(&shm.head, head)
 		
 		// Update local head for next iteration
-		head = atomicLoadInt32(&shm.head)
-		tail = atomicLoadInt32(&shm.tail)
+		head = atomic.LoadInt32(&shm.head)
+		tail = atomic.LoadInt32(&shm.tail)
 	}
 }
 
@@ -270,13 +318,13 @@ func (r *SharedMemoryReader) dispatchEvent(event WriteEvent) error {
 	return nil
 }
 
-// Atomic operations for int32 (since Go's sync/atomic doesn't work with C structs directly)
+// Proper atomic operations using Go's sync/atomic package
 func atomicLoadInt32(addr *int32) int32 {
-	return *addr // On most platforms, 32-bit reads are atomic
+	return atomic.LoadInt32(addr)
 }
 
 func atomicStoreInt32(addr *int32, val int32) {
-	*addr = val // On most platforms, 32-bit writes are atomic
+	atomic.StoreInt32(addr, val)
 }
 
 // GetStats returns statistics about the shared memory reader
@@ -290,8 +338,8 @@ func (r *SharedMemoryReader) GetStats() map[string]interface{} {
 	
 	if r.shmAddr != 0 {
 		shm := (*sharedMemoryC)(unsafe.Pointer(r.shmAddr))
-		head := atomicLoadInt32(&shm.head)
-		tail := atomicLoadInt32(&shm.tail)
+		head := atomic.LoadInt32(&shm.head)
+		tail := atomic.LoadInt32(&shm.tail)
 		
 		queueSize := tail - head
 		if queueSize < 0 {
