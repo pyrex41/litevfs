@@ -25,7 +25,7 @@ deps:
 	go mod init distsqlite 2>/dev/null || true
 	go mod tidy
 
-build: deps $(BUILD_DIR)/distsqlite $(BUILD_DIR)/distsqlite-inject.so
+build: deps $(BUILD_DIR)/distsqlite $(BUILD_DIR)/distsqlite-coordinator $(BUILD_DIR)/distsqlite-inject.so
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -34,6 +34,11 @@ $(BUILD_DIR):
 $(BUILD_DIR)/distsqlite: $(BUILD_DIR) $(wildcard cmd/distsqlite/*.go) $(wildcard pkg/**/*.go)
 	@echo "Building DistSQLite sidecar..."
 	cd cmd/distsqlite && go build $(GO_BUILD_FLAGS) -o ../../$(BUILD_DIR)/distsqlite .
+
+# Build HTTP coordinator binary
+$(BUILD_DIR)/distsqlite-coordinator: $(BUILD_DIR) $(wildcard cmd/distsqlite-coordinator/*.go) $(wildcard pkg/**/*.go)
+	@echo "Building DistSQLite HTTP coordinator..."
+	cd cmd/distsqlite-coordinator && go build $(GO_BUILD_FLAGS) -o ../../$(BUILD_DIR)/distsqlite-coordinator .
 
 # Build LD_PRELOAD injection library
 $(BUILD_DIR)/distsqlite-inject.so: $(BUILD_DIR) cmd/distsqlite-inject/inject.c pkg/vfs/vfs.c
@@ -110,3 +115,34 @@ demo-multi: build
 stop-demo:
 	@pkill -f distsqlite || true
 	@echo "Demo stopped"
+
+# HTTP coordination demos
+demo-http: build
+	@echo "Starting HTTP coordination demo..."
+	@echo "Terminal 1: Starting HTTP coordinator"
+	$(BUILD_DIR)/distsqlite-coordinator --addr :9090 &
+	@sleep 2
+	@echo "Terminal 2: Starting sidecar with HTTP coordination"
+	$(BUILD_DIR)/distsqlite --coordination http --coordinator-url http://localhost:9090 --data-dir ./demo-data &
+	@sleep 2
+	@echo "Terminal 3: Running application with DistSQLite"
+	cd test/integration && LD_PRELOAD=../../$(BUILD_DIR)/distsqlite-inject.so go run simple_demo.go
+
+demo-http-multi: build
+	@echo "Starting multi-node HTTP coordination demo..."
+	@echo "HTTP coordinator:"
+	$(BUILD_DIR)/distsqlite-coordinator --addr :9090 &
+	@sleep 2
+	@echo "Node 1:"
+	$(BUILD_DIR)/distsqlite --coordination http --coordinator-url http://localhost:9090 --hostname node1 --data-dir ./demo-data1 --targets node2:8080 &
+	@sleep 2
+	@echo "Node 2:"
+	$(BUILD_DIR)/distsqlite --coordination http --coordinator-url http://localhost:9090 --hostname node2 --data-dir ./demo-data2 --targets node1:8080 --http-addr :8081 &
+	@sleep 2
+	@echo "Running demo on node1..."
+	cd test/integration && LD_PRELOAD=../../$(BUILD_DIR)/distsqlite-inject.so go run simple_demo.go
+
+stop-http-demo:
+	@pkill -f distsqlite-coordinator || true
+	@pkill -f distsqlite || true
+	@echo "HTTP demo stopped"

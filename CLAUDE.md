@@ -4,62 +4,87 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This repository contains documentation and research for building a distributed SQLite platform called "LiteVFS" or "DistSQLite" - a zero-code-change sidecar solution that makes any SQLite application globally distributed. The project is in the conceptual/planning phase.
+DistSQLite is a distributed SQLite platform that provides zero-code-change distribution for any SQLite application. It uses VFS interception instead of FUSE for maximum performance and handles bulk operations 10-100x faster than Turso while maintaining simplicity.
 
-## Key Concepts
+## Common Development Commands
 
-### Architecture Goal
-Build a transparent sidecar process that intercepts SQLite operations via VFS (Virtual File System) layer, enabling:
-- Zero code changes required from applications
-- Local-speed reads and writes
-- Intelligent bulk synchronization using sqlite3_rsync
-- Dynamic write lease management across regions
+### Building
+```bash
+make build          # Build both sidecar and injection library
+make deps           # Install dependencies and fetch SQLite binaries
+make clean          # Clean build artifacts
+make install        # Install to system directories
+```
 
-### Core Components (Planned)
-1. **SQLite VFS Module** (C) - Intercepts SQLite operations in-process
-2. **Sidecar Process** (Go) - Handles replication and coordination
-3. **Write Lease Coordinator** (Go/Elixir) - Manages primary assignment
-4. **Replication Engine** - Uses sqlite3_rsync for bulk operations
-5. **Litestream Integration** - Continuous backup to S3
+### Testing
+```bash
+make test           # Run unit tests
+make dev-test       # Run integration test with LD_PRELOAD
+go test -v ./...    # Run Go tests only
+cd test/integration && go test -v .  # Integration tests only
+```
 
-### Competitive Advantage
-- 10-100x faster than Turso for bulk operations
-- No application rewrites needed (vs. Turso's complete API change)
-- Works with any existing SQLite application in any language
+### Development
+```bash
+make lint           # Run linters (golangci-lint, clang-format)
+make dev-consul     # Start Consul in dev mode for testing
+make benchmark      # Run performance benchmarks against Turso
+```
 
-## Project Status
+## Architecture Overview
 
-This is currently a **research and planning repository** containing:
-- Technical architecture discussions
-- Implementation strategy documents
-- Research on SQLite VFS, FUSE, and distributed systems
-- Competitive analysis against Turso, LibSQL, and LiteFS
+### Core Components
+- **SQLite VFS Layer** (`pkg/vfs/vfs.c`) - Direct SQLite VFS interception for transparent operation
+- **Sidecar Process** (`cmd/distsqlite/`) - Go binary handling replication and coordination
+- **Lease Management** (`pkg/lease/consul.go`) - Consul-based write coordination and failover
+- **Hybrid Replication** (`pkg/replication/hybrid.go`) - Smart strategy selection (tx logs vs bulk sync)
+- **sqlite3_rsync Wrapper** (`pkg/rsync/wrapper.go`) - Optimized bulk synchronization
+- **LD_PRELOAD Injection** (`cmd/distsqlite-inject/inject.c`) - Zero-change integration
 
-## Documentation Files
+### Key Design Decisions
+- **VFS instead of FUSE**: Direct SQLite VFS interception avoids FUSE overhead (90% performance penalty)
+- **Hybrid Replication**: Small changes use transaction logs, large changes (≥1MB) use sqlite3_rsync
+- **Zero-Change Integration**: LD_PRELOAD automatically intercepts all SQLite calls
+- **Consul Leasing**: Battle-tested lease management borrowed from LiteFS patterns
 
-- `convo.md` - Initial research conversation on libsql replication and sqlite3_rsync
-- `convo2.md` - Detailed architectural discussions and implementation strategy
-- `litefs_context.txt` - LiteFS codebase analysis for understanding proven patterns
+## Dependencies and Setup
 
-## No Build Commands
+### Required Tools
+- Go 1.21+
+- gcc with SQLite development headers
+- SQLite binaries (automatically fetched via `fetch_sqlite_binaries.sh`)
+- Consul (for lease management)
 
-This repository contains only documentation - there are no build, test, or lint commands as this is a planning/research phase project.
+### Key Dependencies
+- `github.com/hashicorp/consul/api` - Consul integration
+- `github.com/spf13/cobra` - CLI framework
+- `go.uber.org/zap` - Structured logging
 
-## Implementation Notes
+## Usage Patterns
 
-When implementing this project:
-- Use proven tools (Litestream, sqlite3_rsync) rather than building from scratch
-- Focus on VFS interception for transparency, avoid FUSE due to performance limitations
-- Leverage Fly.io's infrastructure for coordination and deployment
-- Implement dynamic lease migration based on write patterns
-- Ensure fence tokens prevent split-brain scenarios during lease transfers
+### Zero-Change Integration
+Any SQLite application can be made distributed without code changes:
+```bash
+LD_PRELOAD=./build/distsqlite-inject.so your-sqlite-app
+```
 
-## Future Development
+### Configuration
+Uses YAML configuration file (`distsqlite.yml`) for cluster setup:
+- Hostname identification
+- Consul URL for coordination
+- Target nodes for replication
 
-The planned implementation timeline is 8 weeks:
-- Weeks 1-2: Core VFS module
-- Weeks 3-4: Sidecar process
-- Weeks 5-6: Distribution logic
-- Weeks 7-8: Production hardening
+### Performance Optimization
+- Bulk operations automatically trigger sqlite3_rsync for 10-100x speed improvement
+- Local SQLite performance maintained with background replication
+- Smart threshold detection (1MB default) for replication strategy selection
 
-The goal is to make SQLite distribution as simple as adding one sidecar process to any deployment.
+## Testing Strategy
+
+Integration tests validate the complete flow:
+- VFS interception working correctly
+- Sidecar process auto-starting
+- Basic database operations functioning
+- Bulk insert optimization triggering
+
+The test suite includes both unit tests for individual components and integration tests that validate the full LD_PRELOAD workflow.

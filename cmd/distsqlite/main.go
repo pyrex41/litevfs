@@ -36,9 +36,15 @@ type Config struct {
 	// HTTP server settings
 	HTTPAddr string
 	
+	// Coordination backend selection
+	CoordinationBackend string // "consul" or "http"
+	
 	// Consul lease settings
 	ConsulURL string
 	LeaseKey  string
+	
+	// HTTP coordination settings
+	CoordinatorURL string
 	
 	// Replication settings
 	ReplicationTargets []string
@@ -47,11 +53,25 @@ type Config struct {
 	AutoStart bool
 }
 
+// LeaseManager interface for both Consul and HTTP coordination
+type LeaseManager interface {
+	Open() error
+	Close() error
+	AcquireLease(ctx context.Context) (*lease.Lease, error)
+	GetCurrentLease(ctx context.Context) (*lease.Lease, error)
+	IsLeaseHolder() bool
+	GetCurrentFenceToken() int64
+	ValidateWrite(fenceToken int64) error
+	ReleaseLease(ctx context.Context) error
+	RenewLease(ctx context.Context) error
+	GetCurrentLeaseholder(ctx context.Context) (string, error)
+}
+
 // Server represents the main DistSQLite sidecar server
 type Server struct {
 	config       *Config
 	logger       *zap.Logger
-	leaseManager *lease.Manager
+	leaseManager LeaseManager
 	replicator   *replication.HybridReplicator
 	ipcReader    *ipc.SharedMemoryReader
 	httpServer   *http.Server
@@ -84,8 +104,10 @@ It acts as a sidecar process that handles replication and coordination automatic
 	rootCmd.Flags().StringVar(&config.AdvertiseURL, "advertise-url", "", "URL for other nodes to access this node")
 	rootCmd.Flags().StringVar(&config.DataDir, "data-dir", "./data", "Data directory for databases")
 	rootCmd.Flags().StringVar(&config.HTTPAddr, "http-addr", DefaultHTTPAddr, "HTTP server address")
+	rootCmd.Flags().StringVar(&config.CoordinationBackend, "coordination", "consul", "Coordination backend: 'consul' or 'http'")
 	rootCmd.Flags().StringVar(&config.ConsulURL, "consul-url", DefaultConsulURL, "Consul server URL")
 	rootCmd.Flags().StringVar(&config.LeaseKey, "lease-key", DefaultLeaseKey, "Consul key for lease coordination")
+	rootCmd.Flags().StringVar(&config.CoordinatorURL, "coordinator-url", "", "HTTP coordinator URL (for http coordination backend)")
 	rootCmd.Flags().StringSliceVar(&config.ReplicationTargets, "targets", []string{}, "Replication target nodes")
 	rootCmd.Flags().BoolVar(&config.AutoStart, "auto-start", false, "Auto-start mode (launched by injection library)")
 	
@@ -145,13 +167,27 @@ func (s *Server) initialize() error {
 		return fmt.Errorf("failed to create data directory: %w", err)
 	}
 	
-	// Initialize lease manager
-	s.leaseManager = lease.NewManager(
-		s.config.ConsulURL,
-		s.config.LeaseKey,
-		s.config.Hostname,
-		s.config.AdvertiseURL,
-	)
+	// Initialize lease manager based on backend choice
+	switch s.config.CoordinationBackend {
+	case "http":
+		s.logger.Info("Using HTTP coordination backend")
+		s.leaseManager = lease.NewHTTPManager(
+			s.config.CoordinatorURL,
+			s.config.LeaseKey,
+			s.config.Hostname,
+			s.config.AdvertiseURL,
+		)
+	case "consul":
+		s.logger.Info("Using Consul coordination backend")
+		s.leaseManager = lease.NewManager(
+			s.config.ConsulURL,
+			s.config.LeaseKey,
+			s.config.Hostname,
+			s.config.AdvertiseURL,
+		)
+	default:
+		return fmt.Errorf("unknown coordination backend: %s (use 'consul' or 'http')", s.config.CoordinationBackend)
+	}
 	
 	if err := s.leaseManager.Open(); err != nil {
 		return fmt.Errorf("failed to initialize lease manager: %w", err)
