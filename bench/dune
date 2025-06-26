@@ -1,0 +1,10 @@
+(executable
+ (public_name distcore_bench)
+ (name bench_distcore)
+ (libraries distcore bigarray-compat unix))
+
+(rule
+ (alias runbench)
+ (deps ./bench_distcore.exe)
+ (action
+  (run ./bench_distcore.exe)))
