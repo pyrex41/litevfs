@@ -53,20 +53,24 @@ func main() {
 
 	switch *mode {
 	case "coordinator":
-		if err := runCoordinator(ctx, config, *nodeID); err != nil {
+		if err := runCoordinator(ctx, config, *nodeID, *dbPath); err != nil {
 			log.Fatalf("Coordinator failed: %v", err)
 		}
 	case "node":
 		if err := runNode(ctx, config, *nodeID, *dbPath); err != nil {
 			log.Fatalf("Node failed: %v", err)
 		}
+	case "demo":
+		if err := runDemo(ctx, config); err != nil {
+			log.Fatalf("Demo failed: %v", err)
+		}
 	default:
-		log.Fatalf("Unknown mode: %s", *mode)
+		log.Fatalf("Unknown mode: %s (use: coordinator, node, demo)", *mode)
 	}
 }
 
 // runCoordinator starts a ZMQ coordinator
-func runCoordinator(ctx context.Context, config *zmq.TransportConfig, nodeID string) error {
+func runCoordinator(ctx context.Context, config *zmq.TransportConfig, nodeID, dbPath string) error {
 	coordinator, err := zmq.NewCoordinator(config, nodeID)
 	if err != nil {
 		return err
@@ -77,7 +81,18 @@ func runCoordinator(ctx context.Context, config *zmq.TransportConfig, nodeID str
 		return err
 	}
 
+	// Add replication manager for demo
+	replicationMgr := zmq.NewReplicationManager(coordinator.GetTransport())
+	if err := replicationMgr.Start(); err != nil {
+		return err
+	}
+	defer replicationMgr.Stop()
+
+	// Start test publisher for demonstration
+	replicationMgr.StartTestPublisher(dbPath, 2*time.Second)
+
 	log.Printf("ZMQ Coordinator running on %s", config.BindAddr)
+	log.Printf("Publishing test WAL diffs for %s every 2 seconds", dbPath)
 
 	<-ctx.Done()
 	return nil
@@ -97,9 +112,62 @@ func runNode(ctx context.Context, config *zmq.TransportConfig, nodeID, dbPath st
 
 	log.Printf("ZMQ Node %s connected", nodeID)
 
+	// Add replication manager for receiving diffs
+	replicationMgr := zmq.NewReplicationManager(transport)
+	if err := replicationMgr.Start(); err != nil {
+		return err
+	}
+	defer replicationMgr.Stop()
+
+	// Subscribe to WAL diffs for this database
+	if err := replicationMgr.SubscribeDatabase(dbPath, 0, zmq.TestDiffHandler); err != nil {
+		log.Printf("Failed to subscribe to database %s: %v", dbPath, err)
+	} else {
+		log.Printf("Subscribed to WAL diffs for %s", dbPath)
+	}
+
 	// Test lease operations
 	go testLeaseOperations(ctx, transport, dbPath)
 
+	<-ctx.Done()
+	return nil
+}
+
+// runDemo demonstrates coordinator and node interaction
+func runDemo(ctx context.Context, config *zmq.TransportConfig) error {
+	log.Printf("Starting ZMQ Demo - coordinator and 2 nodes")
+
+	// Start coordinator
+	coordinatorCtx, coordCancel := context.WithCancel(ctx)
+	defer coordCancel()
+
+	go func() {
+		if err := runCoordinator(coordinatorCtx, config, "coordinator", "demo.db"); err != nil {
+			log.Printf("Coordinator error: %v", err)
+		}
+	}()
+
+	// Give coordinator time to start
+	time.Sleep(2 * time.Second)
+
+	// Start two nodes
+	go func() {
+		nodeConfig := *config
+		nodeConfig.Peers = []string{"localhost:5555"}
+		if err := runNode(ctx, &nodeConfig, "node1", "demo.db"); err != nil {
+			log.Printf("Node1 error: %v", err)
+		}
+	}()
+
+	go func() {
+		nodeConfig := *config
+		nodeConfig.Peers = []string{"localhost:5555"}
+		if err := runNode(ctx, &nodeConfig, "node2", "demo.db"); err != nil {
+			log.Printf("Node2 error: %v", err)
+		}
+	}()
+
+	log.Printf("Demo running - coordinator publishing diffs, 2 nodes subscribing")
 	<-ctx.Done()
 	return nil
 }
