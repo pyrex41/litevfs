@@ -1,0 +1,303 @@
+#include <sqlite3.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <assert.h>
+#include <unistd.h>
+#include <sys/stat.h>
+
+// Test framework
+#define TEST_ASSERT(condition, message) \
+    do { \
+        if (!(condition)) { \
+            fprintf(stderr, "FAIL: %s:%d: %s\n", __FILE__, __LINE__, message); \
+            return 1; \
+        } \
+    } while (0)
+
+#define TEST_SUCCESS() \
+    do { \
+        printf("PASS: %s\n", __func__); \
+        return 0; \
+    } while (0)
+
+// Test fixture
+static const char *test_db = "test_vfs.db";
+static const char *test_wal = "test_vfs.db-wal";
+static const char *test_shm = "test_vfs.db-shm";
+
+// Clean up test files
+static void cleanup_test_files() {
+    unlink(test_db);
+    unlink(test_wal);
+    unlink(test_shm);
+}
+
+// Test VFS registration
+int test_vfs_registration() {
+    sqlite3_vfs *vfs = sqlite3_vfs_find("distsqlite");
+    TEST_ASSERT(vfs != NULL, "DistSQLite VFS should be registered");
+    TEST_ASSERT(strcmp(vfs->zName, "distsqlite") == 0, "VFS name should be 'distsqlite'");
+    TEST_ASSERT(vfs->szOsFile > 0, "VFS file size should be positive");
+    TEST_ASSERT(vfs->xOpen != NULL, "VFS xOpen should be implemented");
+    TEST_ASSERT(vfs->xDelete != NULL, "VFS xDelete should be implemented");
+    TEST_ASSERT(vfs->xAccess != NULL, "VFS xAccess should be implemented");
+    TEST_SUCCESS();
+}
+
+// Test basic database operations
+int test_basic_operations() {
+    cleanup_test_files();
+    
+    sqlite3 *db;
+    int rc = sqlite3_open_v2(test_db, &db, 
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+        "distsqlite");
+    TEST_ASSERT(rc == SQLITE_OK, "Should open database with distsqlite VFS");
+    
+    // Create table
+    const char *create_sql = "CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)";
+    rc = sqlite3_exec(db, create_sql, NULL, NULL, NULL);
+    TEST_ASSERT(rc == SQLITE_OK, "Should create table");
+    
+    // Insert data
+    const char *insert_sql = "INSERT INTO test (value) VALUES ('hello'), ('world')";
+    rc = sqlite3_exec(db, insert_sql, NULL, NULL, NULL);
+    TEST_ASSERT(rc == SQLITE_OK, "Should insert data");
+    
+    // Query data
+    sqlite3_stmt *stmt;
+    rc = sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM test", -1, &stmt, NULL);
+    TEST_ASSERT(rc == SQLITE_OK, "Should prepare query");
+    
+    rc = sqlite3_step(stmt);
+    TEST_ASSERT(rc == SQLITE_ROW, "Should have result row");
+    
+    int count = sqlite3_column_int(stmt, 0);
+    TEST_ASSERT(count == 2, "Should have 2 rows");
+    
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    
+    cleanup_test_files();
+    TEST_SUCCESS();
+}
+
+// Test WAL mode operations
+int test_wal_mode() {
+    cleanup_test_files();
+    
+    sqlite3 *db;
+    int rc = sqlite3_open_v2(test_db, &db, 
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+        "distsqlite");
+    TEST_ASSERT(rc == SQLITE_OK, "Should open database");
+    
+    // Enable WAL mode
+    rc = sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
+    TEST_ASSERT(rc == SQLITE_OK, "Should enable WAL mode");
+    
+    // Create and populate table
+    rc = sqlite3_exec(db, "CREATE TABLE wal_test (id INTEGER PRIMARY KEY, data BLOB)", NULL, NULL, NULL);
+    TEST_ASSERT(rc == SQLITE_OK, "Should create table in WAL mode");
+    
+    // Insert larger data to trigger WAL writes
+    const char *insert_sql = "INSERT INTO wal_test (data) VALUES (randomblob(1000))";
+    for (int i = 0; i < 100; i++) {
+        rc = sqlite3_exec(db, insert_sql, NULL, NULL, NULL);
+        TEST_ASSERT(rc == SQLITE_OK, "Should insert blob data");
+    }
+    
+    // Verify WAL file exists
+    struct stat st;
+    TEST_ASSERT(stat(test_wal, &st) == 0, "WAL file should exist");
+    TEST_ASSERT(st.st_size > 0, "WAL file should have content");
+    
+    // Checkpoint
+    rc = sqlite3_exec(db, "PRAGMA wal_checkpoint", NULL, NULL, NULL);
+    TEST_ASSERT(rc == SQLITE_OK, "Should checkpoint WAL");
+    
+    sqlite3_close(db);
+    cleanup_test_files();
+    TEST_SUCCESS();
+}
+
+// Test concurrent read operations
+int test_concurrent_reads() {
+    cleanup_test_files();
+    
+    // Create and populate database
+    sqlite3 *write_db;
+    int rc = sqlite3_open_v2(test_db, &write_db, 
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+        "distsqlite");
+    TEST_ASSERT(rc == SQLITE_OK, "Should open write database");
+    
+    rc = sqlite3_exec(write_db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
+    TEST_ASSERT(rc == SQLITE_OK, "Should enable WAL mode");
+    
+    rc = sqlite3_exec(write_db, "CREATE TABLE concurrent (id INTEGER PRIMARY KEY, value INTEGER)", NULL, NULL, NULL);
+    TEST_ASSERT(rc == SQLITE_OK, "Should create table");
+    
+    // Insert test data
+    for (int i = 0; i < 10; i++) {
+        char sql[256];
+        snprintf(sql, sizeof(sql), "INSERT INTO concurrent VALUES (%d, %d)", i, i * 100);
+        rc = sqlite3_exec(write_db, sql, NULL, NULL, NULL);
+        TEST_ASSERT(rc == SQLITE_OK, "Should insert data");
+    }
+    
+    // Open multiple read connections
+    sqlite3 *readers[5];
+    for (int i = 0; i < 5; i++) {
+        rc = sqlite3_open_v2(test_db, &readers[i], 
+            SQLITE_OPEN_READONLY,
+            "distsqlite");
+        TEST_ASSERT(rc == SQLITE_OK, "Should open reader connection");
+    }
+    
+    // Concurrent reads
+    for (int i = 0; i < 5; i++) {
+        sqlite3_stmt *stmt;
+        rc = sqlite3_prepare_v2(readers[i], "SELECT SUM(value) FROM concurrent", -1, &stmt, NULL);
+        TEST_ASSERT(rc == SQLITE_OK, "Should prepare read query");
+        
+        rc = sqlite3_step(stmt);
+        TEST_ASSERT(rc == SQLITE_ROW, "Should have result");
+        
+        int sum = sqlite3_column_int(stmt, 0);
+        TEST_ASSERT(sum == 4500, "Sum should be correct");
+        
+        sqlite3_finalize(stmt);
+    }
+    
+    // Close all connections
+    for (int i = 0; i < 5; i++) {
+        sqlite3_close(readers[i]);
+    }
+    sqlite3_close(write_db);
+    
+    cleanup_test_files();
+    TEST_SUCCESS();
+}
+
+// Test file locking
+int test_file_locking() {
+    cleanup_test_files();
+    
+    sqlite3 *db1, *db2;
+    int rc;
+    
+    // Open first connection
+    rc = sqlite3_open_v2(test_db, &db1, 
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+        "distsqlite");
+    TEST_ASSERT(rc == SQLITE_OK, "Should open first connection");
+    
+    rc = sqlite3_exec(db1, "CREATE TABLE lock_test (id INTEGER)", NULL, NULL, NULL);
+    TEST_ASSERT(rc == SQLITE_OK, "Should create table");
+    
+    // Start transaction on first connection
+    rc = sqlite3_exec(db1, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+    TEST_ASSERT(rc == SQLITE_OK, "Should begin transaction");
+    
+    // Open second connection
+    rc = sqlite3_open_v2(test_db, &db2, 
+        SQLITE_OPEN_READWRITE,
+        "distsqlite");
+    TEST_ASSERT(rc == SQLITE_OK, "Should open second connection");
+    
+    // Try to write from second connection (should fail)
+    rc = sqlite3_exec(db2, "INSERT INTO lock_test VALUES (1)", NULL, NULL, NULL);
+    TEST_ASSERT(rc != SQLITE_OK, "Write should fail due to lock");
+    
+    // Commit first transaction
+    rc = sqlite3_exec(db1, "COMMIT", NULL, NULL, NULL);
+    TEST_ASSERT(rc == SQLITE_OK, "Should commit transaction");
+    
+    // Now second connection should succeed
+    rc = sqlite3_exec(db2, "INSERT INTO lock_test VALUES (2)", NULL, NULL, NULL);
+    TEST_ASSERT(rc == SQLITE_OK, "Write should succeed after lock release");
+    
+    sqlite3_close(db1);
+    sqlite3_close(db2);
+    
+    cleanup_test_files();
+    TEST_SUCCESS();
+}
+
+// Test large file operations
+int test_large_file_ops() {
+    cleanup_test_files();
+    
+    sqlite3 *db;
+    int rc = sqlite3_open_v2(test_db, &db, 
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+        "distsqlite");
+    TEST_ASSERT(rc == SQLITE_OK, "Should open database");
+    
+    // Create table with blob column
+    rc = sqlite3_exec(db, "CREATE TABLE large_data (id INTEGER PRIMARY KEY, data BLOB)", NULL, NULL, NULL);
+    TEST_ASSERT(rc == SQLITE_OK, "Should create table");
+    
+    // Insert 10MB of data
+    sqlite3_stmt *stmt;
+    rc = sqlite3_prepare_v2(db, "INSERT INTO large_data (data) VALUES (?)", -1, &stmt, NULL);
+    TEST_ASSERT(rc == SQLITE_OK, "Should prepare insert");
+    
+    size_t blob_size = 10 * 1024 * 1024; // 10MB
+    void *blob_data = malloc(blob_size);
+    TEST_ASSERT(blob_data != NULL, "Should allocate blob memory");
+    memset(blob_data, 0xAB, blob_size); // Fill with pattern
+    
+    sqlite3_bind_blob(stmt, 1, blob_data, blob_size, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    TEST_ASSERT(rc == SQLITE_DONE, "Should insert large blob");
+    
+    sqlite3_finalize(stmt);
+    
+    // Read back and verify
+    rc = sqlite3_prepare_v2(db, "SELECT data FROM large_data WHERE id = 1", -1, &stmt, NULL);
+    TEST_ASSERT(rc == SQLITE_OK, "Should prepare select");
+    
+    rc = sqlite3_step(stmt);
+    TEST_ASSERT(rc == SQLITE_ROW, "Should have result");
+    
+    const void *read_data = sqlite3_column_blob(stmt, 0);
+    int read_size = sqlite3_column_bytes(stmt, 0);
+    TEST_ASSERT(read_size == blob_size, "Blob size should match");
+    TEST_ASSERT(memcmp(read_data, blob_data, 1024) == 0, "Blob data should match");
+    
+    sqlite3_finalize(stmt);
+    free(blob_data);
+    sqlite3_close(db);
+    
+    cleanup_test_files();
+    TEST_SUCCESS();
+}
+
+// Run all tests
+int main(int argc, char **argv) {
+    printf("=== DistSQLite VFS Unit Tests ===\n\n");
+    
+    int failed = 0;
+    
+    // Note: These tests assume the VFS is already initialized
+    // In real usage, distVFSInit() would be called first
+    
+    failed += test_vfs_registration();
+    failed += test_basic_operations();
+    failed += test_wal_mode();
+    failed += test_concurrent_reads();
+    failed += test_file_locking();
+    failed += test_large_file_ops();
+    
+    printf("\n=== Test Summary ===\n");
+    if (failed == 0) {
+        printf("All tests passed!\n");
+        return 0;
+    } else {
+        printf("%d tests failed!\n", failed);
+        return 1;
+    }
+}

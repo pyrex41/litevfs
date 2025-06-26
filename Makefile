@@ -49,10 +49,38 @@ $(BUILD_DIR)/distsqlite-inject.so: $(BUILD_DIR) cmd/distsqlite-inject/inject.c p
 		$(LDFLAGS)
 
 test:
-	@echo "Running tests..."
-	go test -v ./...
-	@echo "Running integration tests..."
-	cd test/integration && go test -v .
+	@echo "Running comprehensive test suite..."
+	./test/run_tests.sh
+
+test-unit:
+	@echo "Running unit tests only..."
+	go test -v ./test/unit ./pkg/rsync
+
+test-integration:
+	@echo "Running integration tests only..."
+	go test -v ./test/integration
+
+test-benchmarks:
+	@echo "Running performance benchmarks..."
+	go test -v ./test/benchmarks -bench=. -benchmem
+
+test-vfs:
+	@echo "Running VFS unit tests..."
+	cd test/unit && gcc -o vfs_test vfs_test.c -lsqlite3 -I../../sqlite && ./vfs_test
+
+test-coverage:
+	@echo "Running tests with coverage..."
+	go test -v -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out -o coverage.html
+	@echo "Coverage report generated: coverage.html"
+
+test-race:
+	@echo "Running tests with race detection..."
+	go test -v -race ./test/unit ./test/integration
+
+test-stress:
+	@echo "Running stress tests..."
+	go test -v ./test/integration -run TestConcurrent -count=10
 
 clean:
 	rm -rf $(BUILD_DIR)
