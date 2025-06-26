@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 #include <unistd.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -101,6 +102,11 @@ typedef struct DistFile {
     int writeCount;            // Number of writes since last batch
     int64_t lastBatchTime;     // Last batch time in nanoseconds
 } DistFile;
+
+// Compile-time assertion to ensure base struct is first in DistFile
+// This is required by SQLite's VFS interface
+_Static_assert(offsetof(DistFile, base) == 0, 
+               "sqlite3_file base must be first member of DistFile");
 
 // Global VFS instance
 static DistVFS *g_distVFS = NULL;
@@ -276,7 +282,11 @@ int distVFSInit(void *goCallbacks) {
     // Override with our methods
     g_distVFS->base.zName = "distsqlite";
     g_distVFS->base.pAppData = g_distVFS;
-    g_distVFS->base.szOsFile = sizeof(DistFile);  // FIX: Use our struct size, not original
+    // Ensure our file size is at least as large as the original VFS requires
+    // This is critical for SQLite compatibility
+    g_distVFS->base.szOsFile = (sizeof(DistFile) > pOriginal->szOsFile) 
+                               ? sizeof(DistFile) 
+                               : pOriginal->szOsFile;
     g_distVFS->base.xOpen = distVfsOpen;
     g_distVFS->base.xDelete = distVfsDelete;
     g_distVFS->base.xAccess = distVfsAccess;
