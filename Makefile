@@ -81,6 +81,20 @@ test-ocaml:
 	@echo "Running OCaml core tests..."
 	cd $(SRC_DIR) && dune runtest
 
+test-ocaml-unit:
+	@echo "Running comprehensive OCaml unit tests..."
+	cd test/unit && dune exec ./ocaml_unit_test.exe
+
+test-ocaml-memory-safety:
+	@echo "Running OCaml tests with memory leak detection..."
+	cd test/unit && valgrind --leak-check=full --error-exitcode=1 --tool=memcheck dune exec ./ocaml_unit_test.exe
+
+test-ocaml-coverage:
+	@echo "Running OCaml tests with coverage analysis..."
+	cd $(SRC_DIR) && dune runtest --instrument-with bisect_ppx
+	cd test/unit && dune exec --instrument-with bisect_ppx ./ocaml_unit_test.exe
+	bisect-ppx-report html
+
 test-go:
 	@echo "Running comprehensive Go test suite..."
 	./test/run_tests.sh

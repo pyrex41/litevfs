@@ -18,6 +18,7 @@ typedef struct {
     char* data;
     int is_wal;
     int64_t fence_token;
+    int _needs_free;  /* Internal flag for memory management */
 } write_event_t;
 
 /* Replication strategy enum */
@@ -31,6 +32,9 @@ typedef enum {
 /* Initialization and cleanup */
 void distcore_init(void);
 void distcore_cleanup(void);
+
+/* Memory management functions */
+void distcore_cleanup_write_events(write_event_t* events, int count);
 
 /* Lock-free write queue operations */
 void* distcore_queue_create(int capacity);
@@ -60,6 +64,16 @@ typedef struct {
 
 int distcore_get_stats(distcore_stats_t* stats);
 void distcore_reset_stats(void);
+
+/* VFS integration functions */
+void* distcore_create_page_tracker(int page_size);
+int distcore_vfs_intercept_read(void* file, char* buffer, int64_t offset, int amount);
+int distcore_vfs_intercept_write(void* file, char* buffer, int64_t offset, int amount);
+int distcore_get_sync_pages(void* file, int* page_nums, char** page_hashes, char** page_data, int max_pages);
+int distcore_compute_diff_pages(int* local_pages, char** local_hashes, 
+                               int* replica_pages, char** replica_hashes, 
+                               int local_count, int replica_count,
+                               int* diff_pages, int max_diff);
 
 #ifdef __cplusplus
 }

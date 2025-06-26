@@ -10,6 +10,27 @@
 #include <string.h>
 #include <stdint.h>
 #include <immintrin.h>  /* For SIMD intrinsics */
+#include <cpuid.h>      /* For CPU feature detection */
+
+/* CPU feature detection */
+static int cpu_has_avx2 = -1; /* -1 = not checked, 0 = no, 1 = yes */
+
+static int check_avx2_support(void) {
+    if (cpu_has_avx2 != -1) {
+        return cpu_has_avx2;
+    }
+    
+    unsigned int eax, ebx, ecx, edx;
+    
+    /* Check for AVX2 support */
+    if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
+        cpu_has_avx2 = (ebx & (1 << 5)) ? 1 : 0; /* AVX2 bit */
+    } else {
+        cpu_has_avx2 = 0;
+    }
+    
+    return cpu_has_avx2;
+}
 
 /* Write event structure matching Go and OCaml */
 typedef struct {
@@ -19,7 +40,21 @@ typedef struct {
     char* data;
     int is_wal;
     int64_t fence_token;
+    int _needs_free;  /* Internal flag for memory management */
 } write_event_t;
+
+/* Cleanup function for write events */
+void distcore_cleanup_write_events(write_event_t* events, int count) {
+    if (!events) return;
+    
+    for (int i = 0; i < count; i++) {
+        if (events[i]._needs_free && events[i].path) {
+            free(events[i].path);
+            events[i].path = NULL;
+            events[i]._needs_free = 0;
+        }
+    }
+}
 
 /* Initialize OCaml runtime - called once from Go */
 void distcore_init() {
@@ -98,12 +133,21 @@ int distcore_queue_dequeue_batch(void* queue, write_event_t* events, int max_eve
         
         /* Extract fields from OCaml record */
         const char* path = String_val(Field(ml_event, 0));
-        events[i].path = malloc(strlen(path) + 1);
+        size_t path_len = strlen(path);
+        
+        /* Use stack allocation for small strings, heap for large ones */
+        if (path_len < 256) {
+            events[i].path = alloca(path_len + 1);
+        } else {
+            events[i].path = malloc(path_len + 1);
+            /* Mark for cleanup - we'll track this */
+            events[i]._needs_free = 1;
+        }
         strcpy(events[i].path, path);
         
         events[i].offset = Int64_val(Field(ml_event, 1));
         
-        /* Extract data from Bigarray */
+        /* Extract data from Bigarray - this is already managed by OCaml */
         value ml_data = Field(ml_event, 2);
         struct caml_ba_array* ba = Caml_ba_array_val(ml_data);
         events[i].data = (char*)ba->data;
@@ -111,6 +155,7 @@ int distcore_queue_dequeue_batch(void* queue, write_event_t* events, int max_eve
         
         events[i].is_wal = Bool_val(Field(ml_event, 3));
         events[i].fence_token = Int64_val(Field(ml_event, 4));
+        events[i]._needs_free = 0; /* Default to no cleanup needed */
     }
     
     CAMLreturnT(int, count);
@@ -213,15 +258,22 @@ int distcore_encode_write_batch(const write_event_t* events, int count,
     
     result = caml_callback(*encode_func, batch_array);
     
-    /* Copy encoded data from OCaml Bigarray to C buffer */
+    /* Copy encoded data from OCaml Bigarray to C buffer with bounds checking */
     struct caml_ba_array* ba = Caml_ba_array_val(result);
     int encoded_size = ba->dim[0];
     
-    if (encoded_size <= buffer_size) {
+    /* Validate sizes */
+    if (encoded_size < 0 || buffer_size < 0) {
+        CAMLreturnT(int, -2); /* Invalid size parameters */
+    }
+    
+    if (encoded_size <= buffer_size && output_buffer != NULL && ba->data != NULL) {
         memcpy(output_buffer, ba->data, encoded_size);
         CAMLreturnT(int, encoded_size);
-    } else {
+    } else if (encoded_size > buffer_size) {
         CAMLreturnT(int, -1); /* Buffer too small */
+    } else {
+        CAMLreturnT(int, -3); /* Null pointer error */
     }
 }
 
@@ -256,19 +308,36 @@ int distcore_compute_diff(const char* old_db, int old_size,
 
 /* SIMD-optimized memory operations */
 
-/* SIMD memory comparison */
+/* SIMD memory comparison with bounds checking */
 value distcore_memcmp_stub(value v_arr1, value v_offset1, value v_arr2, value v_offset2, value v_len) {
     CAMLparam5(v_arr1, v_offset1, v_arr2, v_offset2, v_len);
     
     struct caml_ba_array* ba1 = Caml_ba_array_val(v_arr1);
     struct caml_ba_array* ba2 = Caml_ba_array_val(v_arr2);
     
-    char* ptr1 = (char*)ba1->data + Int_val(v_offset1);
-    char* ptr2 = (char*)ba2->data + Int_val(v_offset2);
+    int offset1 = Int_val(v_offset1);
+    int offset2 = Int_val(v_offset2);
     int len = Int_val(v_len);
     
-    /* SIMD-optimized comparison for aligned data */
-    if (len >= 32 && ((uintptr_t)ptr1 % 32) == 0 && ((uintptr_t)ptr2 % 32) == 0) {
+    /* Bounds checking */
+    if (offset1 < 0 || offset2 < 0 || len < 0) {
+        CAMLreturn(Val_int(-1)); /* Invalid parameters */
+    }
+    
+    if (offset1 + len > ba1->dim[0] || offset2 + len > ba2->dim[0]) {
+        CAMLreturn(Val_int(-1)); /* Out of bounds */
+    }
+    
+    if (!ba1->data || !ba2->data) {
+        CAMLreturn(Val_int(-1)); /* Null pointer */
+    }
+    
+    char* ptr1 = (char*)ba1->data + offset1;
+    char* ptr2 = (char*)ba2->data + offset2;
+    
+    /* SIMD-optimized comparison for aligned data - check CPU support first */
+    if (check_avx2_support() && len >= 32 && 
+        ((uintptr_t)ptr1 % 32) == 0 && ((uintptr_t)ptr2 % 32) == 0) {
         int simd_len = len & ~31; /* Round down to multiple of 32 */
         
         for (int i = 0; i < simd_len; i += 32) {
@@ -589,18 +658,35 @@ int distcore_get_sync_pages(void* file, int* page_nums, char** page_hashes, char
         /* Extract (page_num, hash, data) tuple */
         page_nums[count] = Int_val(Field(page_tuple, 0));
         
-        /* Copy hash string */
+        /* Copy hash string - caller responsible for freeing */
         value hash_val = Field(page_tuple, 1);
         int hash_len = caml_string_length(hash_val);
         page_hashes[count] = malloc(hash_len + 1);
+        if (!page_hashes[count]) {
+            /* Cleanup already allocated memory on failure */
+            for (int j = 0; j < count; j++) {
+                free(page_hashes[j]);
+                free(page_data[j]);
+            }
+            CAMLreturnT(int, -1);
+        }
         memcpy(page_hashes[count], String_val(hash_val), hash_len);
         page_hashes[count][hash_len] = '\0';
         
-        /* Copy page data */
+        /* Copy page data - caller responsible for freeing */
         value data_val = Field(page_tuple, 2);
         struct caml_ba_array* ba = Caml_ba_array_val(data_val);
         int data_len = ba->dim[0];
         page_data[count] = malloc(data_len);
+        if (!page_data[count]) {
+            /* Cleanup on failure */
+            free(page_hashes[count]);
+            for (int j = 0; j < count; j++) {
+                free(page_hashes[j]);
+                free(page_data[j]);
+            }
+            CAMLreturnT(int, -1);
+        }
         memcpy(page_data[count], ba->data, data_len);
         
         pages_list = Field(pages_list, 1);

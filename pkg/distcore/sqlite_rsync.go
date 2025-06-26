@@ -19,6 +19,8 @@ import "C"
 import (
 	"fmt"
 	"net"
+	"path/filepath"
+	"strings"
 	"sync"
 	"unsafe"
 )
@@ -77,6 +79,15 @@ type VFSFile struct {
 
 // NewVFSFile creates a new VFS file with interception
 func NewVFSFile(path string, pageSize int) (*VFSFile, error) {
+	// Input validation for security
+	if err := validateFilePath(path); err != nil {
+		return nil, fmt.Errorf("invalid file path: %w", err)
+	}
+	
+	if pageSize <= 0 || pageSize > 65536 || (pageSize&(pageSize-1)) != 0 {
+		return nil, fmt.Errorf("invalid page size: must be power of 2 between 1 and 65536, got %d", pageSize)
+	}
+	
 	tracker, err := NewPageTracker(pageSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create page tracker: %w", err)
@@ -87,6 +98,35 @@ func NewVFSFile(path string, pageSize int) (*VFSFile, error) {
 		tracker:   tracker,
 		intercept: true,
 	}, nil
+}
+
+// validateFilePath checks for path injection vulnerabilities
+func validateFilePath(path string) error {
+	if path == "" {
+		return fmt.Errorf("empty path")
+	}
+	
+	// Check for directory traversal attempts
+	if strings.Contains(path, "..") {
+		return fmt.Errorf("path contains directory traversal")
+	}
+	
+	// Check for null bytes
+	if strings.Contains(path, "\x00") {
+		return fmt.Errorf("path contains null bytes")
+	}
+	
+	// Must be absolute path for security
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("path must be absolute")
+	}
+	
+	// Check path length
+	if len(path) > 4096 {
+		return fmt.Errorf("path too long (max 4096 characters)")
+	}
+	
+	return nil
 }
 
 // Read intercepts SQLite reads to track page access

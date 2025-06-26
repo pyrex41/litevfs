@@ -113,53 +113,59 @@ let initialize () =
   Printf.printf "[DistCore] OCaml performance engine initialized\n%!";
   true
 
-(** Performance monitoring *)
+(** Performance monitoring with thread safety *)
 module PerfMonitor = struct
   type stats = {
-    mutable queue_enqueues: int64;
-    mutable queue_dequeues: int64;
-    mutable bytes_processed: int64;
-    mutable diff_operations: int64;
-    mutable replication_operations: int64;
-    mutable state_transitions: int64;
+    queue_enqueues: int64;
+    queue_dequeues: int64;
+    bytes_processed: int64;
+    diff_operations: int64;
+    replication_operations: int64;
+    state_transitions: int64;
   }
   
-  let global_stats = {
-    queue_enqueues = 0L;
-    queue_dequeues = 0L;
-    bytes_processed = 0L;
-    diff_operations = 0L;
-    replication_operations = 0L;
-    state_transitions = 0L;
-  }
+  (* Thread-safe atomic counters *)
+  let atomic_queue_enqueues = Atomic.make 0L
+  let atomic_queue_dequeues = Atomic.make 0L
+  let atomic_bytes_processed = Atomic.make 0L
+  let atomic_diff_operations = Atomic.make 0L
+  let atomic_replication_operations = Atomic.make 0L
+  let atomic_state_transitions = Atomic.make 0L
   
   let record_queue_enqueue () =
-    global_stats.queue_enqueues <- Int64.add global_stats.queue_enqueues 1L
+    Atomic.incr atomic_queue_enqueues
   
   let record_queue_dequeue count =
-    global_stats.queue_dequeues <- Int64.add global_stats.queue_dequeues (Int64.of_int count)
+    Atomic.fetch_and_add atomic_queue_dequeues (Int64.of_int count) |> ignore
   
   let record_bytes_processed bytes =
-    global_stats.bytes_processed <- Int64.add global_stats.bytes_processed (Int64.of_int bytes)
+    Atomic.fetch_and_add atomic_bytes_processed (Int64.of_int bytes) |> ignore
   
   let record_diff_operation () =
-    global_stats.diff_operations <- Int64.add global_stats.diff_operations 1L
+    Atomic.incr atomic_diff_operations
   
   let record_replication_operation () =
-    global_stats.replication_operations <- Int64.add global_stats.replication_operations 1L
+    Atomic.incr atomic_replication_operations
   
   let record_state_transition () =
-    global_stats.state_transitions <- Int64.add global_stats.state_transitions 1L
+    Atomic.incr atomic_state_transitions
   
-  let get_stats () = global_stats
+  let get_stats () = {
+    queue_enqueues = Atomic.get atomic_queue_enqueues;
+    queue_dequeues = Atomic.get atomic_queue_dequeues;
+    bytes_processed = Atomic.get atomic_bytes_processed;
+    diff_operations = Atomic.get atomic_diff_operations;
+    replication_operations = Atomic.get atomic_replication_operations;
+    state_transitions = Atomic.get atomic_state_transitions;
+  }
   
   let reset_stats () =
-    global_stats.queue_enqueues <- 0L;
-    global_stats.queue_dequeues <- 0L;
-    global_stats.bytes_processed <- 0L;
-    global_stats.diff_operations <- 0L;
-    global_stats.replication_operations <- 0L;
-    global_stats.state_transitions <- 0L
+    Atomic.set atomic_queue_enqueues 0L;
+    Atomic.set atomic_queue_dequeues 0L;
+    Atomic.set atomic_bytes_processed 0L;
+    Atomic.set atomic_diff_operations 0L;
+    Atomic.set atomic_replication_operations 0L;
+    Atomic.set atomic_state_transitions 0L
 end
 
 (** High-level API functions *)
