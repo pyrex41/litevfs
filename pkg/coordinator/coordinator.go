@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"distsqlite/pkg/rsync"
 )
 
 // Node represents a cluster node
@@ -46,6 +48,9 @@ type Coordinator struct {
 	leaseEvents    []LeaseEvent
 	replicationJobs map[string]*ReplicationRequest
 	
+	// HTTP rsync servers (per database)
+	httpRsyncServers map[string]*rsync.HTTPRsyncServer
+	
 	// Configuration
 	nodeTimeout    time.Duration
 	cleanupTicker  *time.Ticker
@@ -58,12 +63,13 @@ func NewCoordinator() *Coordinator {
 	ctx, cancel := context.WithCancel(context.Background())
 	
 	c := &Coordinator{
-		nodes:           make(map[string]*Node),
-		leaseEvents:     make([]LeaseEvent, 0),
-		replicationJobs: make(map[string]*ReplicationRequest),
-		nodeTimeout:     30 * time.Second,
-		ctx:             ctx,
-		cancel:          cancel,
+		nodes:            make(map[string]*Node),
+		leaseEvents:      make([]LeaseEvent, 0),
+		replicationJobs:  make(map[string]*ReplicationRequest),
+		httpRsyncServers: make(map[string]*rsync.HTTPRsyncServer),
+		nodeTimeout:      30 * time.Second,
+		ctx:              ctx,
+		cancel:           cancel,
 	}
 	
 	// Start background cleanup
@@ -86,6 +92,10 @@ func (c *Coordinator) Start(addr string) error {
 	mux.HandleFunc("/replicate", c.handleReplication)
 	mux.HandleFunc("/replication/queue", c.handleReplicationQueue)
 	mux.HandleFunc("/replication/status", c.handleReplicationStatus)
+	
+	// HTTP rsync endpoints
+	mux.HandleFunc("/rsync", c.handleHTTPRsync)
+	mux.HandleFunc("/rsync/", c.handleHTTPRsync)
 	
 	// Health and status
 	mux.HandleFunc("/health", c.handleHealth)
@@ -339,6 +349,30 @@ func (c *Coordinator) handleHealth(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `{"status": "healthy", "timestamp": "%s"}`, time.Now().Format(time.RFC3339))
 }
 
+// handleHTTPRsync handles HTTP rsync requests
+func (c *Coordinator) handleHTTPRsync(w http.ResponseWriter, r *http.Request) {
+	// Extract database path from query or header
+	dbPath := r.URL.Query().Get("db")
+	if dbPath == "" {
+		dbPath = r.Header.Get("X-Database-Path")
+	}
+	if dbPath == "" {
+		dbPath = "default.db" // Default database
+	}
+	
+	// Get or create HTTP rsync server for this database
+	c.mu.Lock()
+	server, exists := c.httpRsyncServers[dbPath]
+	if !exists {
+		server = rsync.NewHTTPRsyncServer(dbPath)
+		c.httpRsyncServers[dbPath] = server
+	}
+	c.mu.Unlock()
+	
+	// Delegate to the HTTP rsync server
+	server.HandleRsync(w, r)
+}
+
 // handleStatus returns detailed coordinator status
 func (c *Coordinator) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -356,6 +390,7 @@ func (c *Coordinator) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"nodes":          len(c.nodes),
 		"events":         len(c.leaseEvents),
 		"pending_jobs":   len(c.replicationJobs),
+		"rsync_servers":  len(c.httpRsyncServers),
 		"uptime_seconds": int(time.Since(time.Now()).Seconds()),
 		"timestamp":      time.Now().Format(time.RFC3339),
 	})

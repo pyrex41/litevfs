@@ -32,6 +32,15 @@ type Change struct {
 	Data      []byte    `json:"data,omitempty"`
 }
 
+// ReplicationStrategy represents different replication methods
+type ReplicationStrategy string
+
+const (
+	StrategyTxLog    ReplicationStrategy = "txlog"
+	StrategyHTTPRsync ReplicationStrategy = "http-rsync"
+	StrategySSHRsync  ReplicationStrategy = "ssh-rsync"
+)
+
 // WriteTracker tracks write patterns to inform replication strategy
 type WriteTracker struct {
 	mu                sync.RWMutex
@@ -53,10 +62,12 @@ type HybridReplicator struct {
 	mu           sync.RWMutex
 	writeTracker *WriteTracker
 	rsync        *rsync.Wrapper
+	httpRsync    *rsync.HTTPRsyncClient
 	
 	// Configuration
-	bulkThreshold int64
-	maxDelay      time.Duration
+	bulkThreshold     int64
+	maxDelay          time.Duration
+	preferHTTPRsync   bool
 	
 	// Replication targets (other nodes)
 	targets []string
@@ -76,12 +87,14 @@ func NewHybridReplicator(targets []string) *HybridReplicator {
 			databases:         make(map[string]*DatabaseStats),
 			replicationWindow: MaxReplicationDelay,
 		},
-		rsync:         rsync.NewWrapper(),
-		bulkThreshold: BulkThreshold,
-		maxDelay:      MaxReplicationDelay,
-		targets:       targets,
-		ctx:           ctx,
-		cancel:        cancel,
+		rsync:           rsync.NewWrapper(),
+		httpRsync:       rsync.NewHTTPRsyncClient(),
+		bulkThreshold:   BulkThreshold,
+		maxDelay:        MaxReplicationDelay,
+		preferHTTPRsync: true, // Default to HTTP rsync
+		targets:         targets,
+		ctx:             ctx,
+		cancel:          cancel,
 	}
 }
 
@@ -207,14 +220,22 @@ func (h *HybridReplicator) replicateDatabase(dbPath string, stats *DatabaseStats
 		dbPath, len(stats.PendingChanges), totalSize)
 	
 	var err error
+	var strategy ReplicationStrategy
+	
 	if totalSize >= h.bulkThreshold {
-		// Large changes - use sqlite3_rsync
-		err = h.replicateViaBulkSync(dbPath, stats.PendingChanges)
-		log.Printf("[DistSQLite] Used bulk sync (rsync) for %s", dbPath)
+		// Large changes - choose rsync strategy
+		if h.preferHTTPRsync {
+			strategy = StrategyHTTPRsync
+		} else {
+			strategy = StrategySSHRsync
+		}
+		err = h.replicateViaBulkSync(dbPath, stats.PendingChanges, strategy)
+		log.Printf("[DistSQLite] Used %s for %s", strategy, dbPath)
 	} else {
 		// Small changes - use transaction log
+		strategy = StrategyTxLog
 		err = h.replicateViaTxLog(dbPath, stats.PendingChanges)
-		log.Printf("[DistSQLite] Used transaction log for %s", dbPath)
+		log.Printf("[DistSQLite] Used %s for %s", strategy, dbPath)
 	}
 	
 	if err != nil {
@@ -227,8 +248,8 @@ func (h *HybridReplicator) replicateDatabase(dbPath string, stats *DatabaseStats
 	stats.LastSync = time.Now()
 }
 
-// replicateViaBulkSync uses sqlite3_rsync for large changes
-func (h *HybridReplicator) replicateViaBulkSync(dbPath string, changes []Change) error {
+// replicateViaBulkSync uses rsync (HTTP or SSH) for large changes
+func (h *HybridReplicator) replicateViaBulkSync(dbPath string, changes []Change, strategy ReplicationStrategy) error {
 	if len(h.targets) == 0 {
 		return fmt.Errorf("no replication targets configured")
 	}
@@ -238,18 +259,55 @@ func (h *HybridReplicator) replicateViaBulkSync(dbPath string, changes []Change)
 		return fmt.Errorf("database file does not exist: %s", dbPath)
 	}
 	
-	// Replicate to all targets
+	// Replicate to all targets using chosen strategy
 	for _, target := range h.targets {
-		targetPath := h.getTargetPath(target, dbPath)
+		var err error
 		
-		log.Printf("[DistSQLite] Bulk syncing %s to %s", dbPath, targetPath)
+		switch strategy {
+		case StrategyHTTPRsync:
+			err = h.replicateViaHTTPRsync(dbPath, target)
+		case StrategySSHRsync:
+			err = h.replicateViaSSHRsync(dbPath, target)
+		default:
+			err = fmt.Errorf("unknown replication strategy: %s", strategy)
+		}
 		
-		if err := h.rsync.Sync(dbPath, targetPath); err != nil {
-			log.Printf("[DistSQLite] Bulk sync failed to %s: %v", target, err)
+		if err != nil {
+			log.Printf("[DistSQLite] %s replication failed to %s: %v", strategy, target, err)
 			continue // Try other targets
 		}
 		
-		log.Printf("[DistSQLite] Bulk sync successful to %s", target)
+		log.Printf("[DistSQLite] %s replication successful to %s", strategy, target)
+	}
+	
+	return nil
+}
+
+// replicateViaHTTPRsync replicates using HTTP transport
+func (h *HybridReplicator) replicateViaHTTPRsync(dbPath, target string) error {
+	// Construct HTTP URL for target
+	targetURL := fmt.Sprintf("http://%s", target)
+	
+	// Use HTTP rsync client to sync database
+	stats, err := h.httpRsync.HTTPRsyncSync(h.ctx, dbPath, targetURL)
+	if err != nil {
+		return fmt.Errorf("HTTP rsync failed: %w", err)
+	}
+	
+	log.Printf("[DistSQLite] HTTP rsync stats: %d pages sent, %d bytes, %dms", 
+		stats.PagesSent, stats.BytesSent, stats.ElapsedMs)
+	
+	return nil
+}
+
+// replicateViaSSHRsync replicates using SSH transport (fallback)
+func (h *HybridReplicator) replicateViaSSHRsync(dbPath, target string) error {
+	targetPath := h.getTargetPath(target, dbPath)
+	
+	log.Printf("[DistSQLite] SSH rsync syncing %s to %s", dbPath, targetPath)
+	
+	if err := h.rsync.Sync(dbPath, targetPath); err != nil {
+		return fmt.Errorf("SSH rsync failed: %w", err)
 	}
 	
 	return nil
@@ -265,7 +323,11 @@ func (h *HybridReplicator) replicateViaTxLog(dbPath string, changes []Change) er
 	// 3. Apply changes on target nodes
 	
 	log.Printf("[DistSQLite] Transaction log replication not yet implemented, using bulk sync")
-	return h.replicateViaBulkSync(dbPath, changes)
+	strategy := StrategyHTTPRsync
+	if !h.preferHTTPRsync {
+		strategy = StrategySSHRsync
+	}
+	return h.replicateViaBulkSync(dbPath, changes, strategy)
 }
 
 // getTargetPath constructs the target path for a database on a remote node
