@@ -1,0 +1,160 @@
+# OCaml ZMQ Build Configuration for DistSQLite
+
+# Build order matters for dependencies
+OCAML_SOURCES = src/lock_free_queue.ml src/binary_diff.ml src/lease_state_machine.ml \
+                src/replication.ml src/vfs_intercept.ml src/distcore.ml \
+                src/zmq_transport.ml src/zmq_replication.ml src/zmq_integration.ml
+
+OCAML_TEST_SOURCES = src/zmq_test.ml
+
+OCAML_PACKAGES = zmq,unix,threads
+
+# Compiler flags
+OCAMLC_FLAGS = -package $(OCAML_PACKAGES) -linkpkg -g -w +A-4-9-18-40-41-42-44-45-48-70 -I src
+OCAMLOPT_FLAGS = -package $(OCAML_PACKAGES) -linkpkg -O3 -w +A-4-9-18-40-41-42-44-45-48-70 -I src
+
+# Build targets
+.PHONY: ocaml-deps ocaml-build ocaml-test ocaml-clean ocaml-install
+
+# Install OCaml dependencies
+ocaml-deps:
+	@echo "Installing OCaml dependencies..."
+	opam install -y zmq dune ocamlfind
+	@echo "OCaml dependencies installed"
+
+# Build OCaml modules
+ocaml-build: ocaml-deps
+	@echo "Building OCaml ZMQ integration..."
+	# Compile each module individually to handle dependencies
+	ocamlfind ocamlc $(OCAMLC_FLAGS) -c src/lock_free_queue.ml
+	ocamlfind ocamlc $(OCAMLC_FLAGS) -c src/binary_diff.ml
+	ocamlfind ocamlc $(OCAMLC_FLAGS) -c src/lease_state_machine.ml
+	ocamlfind ocamlc $(OCAMLC_FLAGS) -c src/replication.ml
+	ocamlfind ocamlc $(OCAMLC_FLAGS) -c src/vfs_intercept.ml
+	ocamlfind ocamlc $(OCAMLC_FLAGS) -c src/distcore.ml
+	ocamlfind ocamlc $(OCAMLC_FLAGS) -c src/zmq_transport.ml
+	ocamlfind ocamlc $(OCAMLC_FLAGS) -c src/zmq_replication.ml
+	ocamlfind ocamlc $(OCAMLC_FLAGS) -c src/zmq_integration.ml
+	# Create library
+	ocamlfind ocamlc $(OCAMLC_FLAGS) -a -o distsqlite_zmq.cma $(OCAML_SOURCES:.ml=.cmo)
+	@echo "OCaml bytecode library built: distsqlite_zmq.cma"
+	
+	# Build optimized version
+	ocamlfind ocamlopt $(OCAMLOPT_FLAGS) -c src/lock_free_queue.ml
+	ocamlfind ocamlopt $(OCAMLOPT_FLAGS) -c src/binary_diff.ml
+	ocamlfind ocamlopt $(OCAMLOPT_FLAGS) -c src/lease_state_machine.ml
+	ocamlfind ocamlopt $(OCAMLOPT_FLAGS) -c src/replication.ml
+	ocamlfind ocamlopt $(OCAMLOPT_FLAGS) -c src/vfs_intercept.ml
+	ocamlfind ocamlopt $(OCAMLOPT_FLAGS) -c src/distcore.ml
+	ocamlfind ocamlopt $(OCAMLOPT_FLAGS) -c src/zmq_transport.ml
+	ocamlfind ocamlopt $(OCAMLOPT_FLAGS) -c src/zmq_replication.ml
+	ocamlfind ocamlopt $(OCAMLOPT_FLAGS) -c src/zmq_integration.ml
+	# Create optimized library
+	ocamlfind ocamlopt $(OCAMLOPT_FLAGS) -a -o distsqlite_zmq.cmxa $(OCAML_SOURCES:.ml=.cmx)
+	@echo "OCaml native library built: distsqlite_zmq.cmxa"
+
+# Build and run tests
+ocaml-test: ocaml-build
+	@echo "Building OCaml ZMQ tests..."
+	ocamlfind ocamlc $(OCAMLC_FLAGS) distsqlite_zmq.cma -o zmq_test $(OCAML_TEST_SOURCES)
+	@echo "Running OCaml ZMQ tests..."
+	./zmq_test
+
+# Build optimized test
+ocaml-test-opt: ocaml-build
+	@echo "Building optimized OCaml ZMQ tests..."
+	ocamlfind ocamlopt $(OCAMLOPT_FLAGS) distsqlite_zmq.cmxa -o zmq_test_opt $(OCAML_TEST_SOURCES)
+	@echo "Running optimized OCaml ZMQ tests..."
+	./zmq_test_opt
+
+# Clean OCaml build artifacts
+ocaml-clean:
+	@echo "Cleaning OCaml build artifacts..."
+	rm -f src/*.cmi src/*.cmo src/*.cmx src/*.o
+	rm -f *.cma *.cmxa *.a
+	rm -f zmq_test zmq_test_opt
+	@echo "OCaml artifacts cleaned"
+
+# Install OCaml library system-wide
+ocaml-install: ocaml-build
+	@echo "Installing OCaml library..."
+	ocamlfind install distsqlite-zmq META distsqlite_zmq.cma distsqlite_zmq.cmxa distsqlite_zmq.a src/*.cmi
+	@echo "OCaml library installed"
+
+# Create META file for findlib
+META:
+	@echo "Creating META file..."
+	@echo 'version = "1.0"' > META
+	@echo 'description = "DistSQLite ZMQ Integration Library"' >> META
+	@echo 'requires = "zmq,bigarray,unix"' >> META
+	@echo 'archive(byte) = "distsqlite_zmq.cma"' >> META
+	@echo 'archive(native) = "distsqlite_zmq.cmxa"' >> META
+	@echo 'archive(native,plugin) = "distsqlite_zmq.cmxs"' >> META
+
+# Development targets
+ocaml-dev: ocaml-build
+	@echo "Starting OCaml development environment..."
+	ocaml -I +str -package $(OCAML_PACKAGES) distsqlite_zmq.cma
+
+# Interactive test
+ocaml-interactive: ocaml-build
+	@echo "Starting interactive OCaml session..."
+	ocaml -init .ocamlinit -package $(OCAML_PACKAGES) distsqlite_zmq.cma
+
+# Create .ocamlinit for interactive development
+.ocamlinit:
+	@echo "Creating .ocamlinit..."
+	@echo '#require "zmq";;' > .ocamlinit
+	@echo '#load "distsqlite_zmq.cma";;' >> .ocamlinit
+	@echo 'open Zmq_integration;;' >> .ocamlinit
+	@echo 'open DistSQLiteZMQ;;' >> .ocamlinit
+
+# Performance benchmarks
+ocaml-bench: ocaml-test-opt
+	@echo "Running performance benchmarks..."
+	time ./zmq_test_opt 2>&1 | grep -E "(Performance|writes/sec|MB/sec)"
+
+# Memory profiling (requires ocaml-memprof)
+ocaml-profile: ocaml-build
+	@echo "Building with memory profiling..."
+	ocamlfind ocamlopt $(OCAMLOPT_FLAGS) -package memprof distsqlite_zmq.cmxa -o zmq_profile $(OCAML_TEST_SOURCES)
+	./zmq_profile
+
+# Documentation generation
+ocaml-docs: ocaml-build
+	@echo "Generating OCaml documentation..."
+	ocamlfind ocamldoc -package $(OCAML_PACKAGES) -html -d docs/ocaml $(OCAML_SOURCES)
+	@echo "Documentation generated in docs/ocaml/"
+
+# Lint and style checking
+ocaml-lint:
+	@echo "Checking OCaml code style..."
+	@for file in $(OCAML_SOURCES) $(OCAML_TEST_SOURCES); do \
+		echo "Checking $$file..."; \
+		ocamllint $$file || true; \
+	done
+
+# Integration with main Makefile targets
+ocaml-all: ocaml-build ocaml-test
+
+# Add to main Makefile targets
+build: ocaml-build
+test: ocaml-test  
+clean: ocaml-clean
+
+# Help target
+ocaml-help:
+	@echo "OCaml ZMQ Integration Build Targets:"
+	@echo "  ocaml-deps     - Install OCaml dependencies"
+	@echo "  ocaml-build    - Build OCaml libraries"
+	@echo "  ocaml-test     - Build and run tests"
+	@echo "  ocaml-test-opt - Build and run optimized tests"
+	@echo "  ocaml-clean    - Clean build artifacts"
+	@echo "  ocaml-install  - Install library system-wide"
+	@echo "  ocaml-dev      - Start development environment"
+	@echo "  ocaml-bench    - Run performance benchmarks"
+	@echo "  ocaml-docs     - Generate documentation"
+	@echo "  ocaml-lint     - Check code style"
+	@echo ""
+	@echo "Example usage:"
+	@echo "  make ocaml-build && make ocaml-test"

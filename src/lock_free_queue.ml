@@ -116,8 +116,7 @@ module WriteEventQueue = struct
     fence_token: int64;
   }
   
-  type t = write_event lock_free_queue
-  and 'a lock_free_queue = 'a t
+  type queue = write_event t
   
   let create = create
   let enqueue = enqueue

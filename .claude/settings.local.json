@@ -16,7 +16,10 @@
       "Bash(mkdir:*)",
       "Bash(chmod:*)",
       "Bash(mv:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(find:*)",
+      "Bash(./build/distsqlite-zmq --mode node --node-id node1 --peers localhost:5555)",
+      "Bash(./build/distsqlite-zmq:*)"
     ],
     "deny": []
   }

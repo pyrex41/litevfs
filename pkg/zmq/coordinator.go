@@ -100,6 +100,11 @@ func (c *Coordinator) Stop() error {
 	return c.transport.Close()
 }
 
+// GetTransport returns the underlying transport for additional functionality
+func (c *Coordinator) GetTransport() *Transport {
+	return c.transport
+}
+
 // cleanupExpiredLeases periodically removes expired leases
 func (c *Coordinator) cleanupExpiredLeases() {
 	ticker := time.NewTicker(1 * time.Second)
