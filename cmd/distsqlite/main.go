@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"distsqlite/pkg/ipc"
 	"distsqlite/pkg/lease"
 	"distsqlite/pkg/replication"
 
@@ -35,9 +36,15 @@ type Config struct {
 	// HTTP server settings
 	HTTPAddr string
 	
+	// Coordination backend selection
+	CoordinationBackend string // "consul" or "http"
+	
 	// Consul lease settings
 	ConsulURL string
 	LeaseKey  string
+	
+	// HTTP coordination settings
+	CoordinatorURL string
 	
 	// Replication settings
 	ReplicationTargets []string
@@ -46,13 +53,33 @@ type Config struct {
 	AutoStart bool
 }
 
+// LeaseManager interface for both Consul and HTTP coordination
+type LeaseManager interface {
+	Open() error
+	Close() error
+	AcquireLease(ctx context.Context) (*lease.Lease, error)
+	GetCurrentLease(ctx context.Context) (*lease.Lease, error)
+	IsLeaseHolder() bool
+	GetCurrentFenceToken() int64
+	ValidateWrite(fenceToken int64) error
+	ReleaseLease(ctx context.Context) error
+	RenewLease(ctx context.Context) error
+	GetCurrentLeaseholder(ctx context.Context) (string, error)
+}
+
 // Server represents the main DistSQLite sidecar server
 type Server struct {
-	config      *Config
-	logger      *zap.Logger
-	leaseManager *lease.Manager
-	replicator  *replication.HybridReplicator
-	httpServer  *http.Server
+	config       *Config
+	logger       *zap.Logger
+	leaseManager LeaseManager
+	replicator   *replication.HybridReplicator
+	ipcReader    *ipc.SharedMemoryReader
+	httpServer   *http.Server
+	
+	// Statistics
+	writeEvents    int64
+	batchEvents    int64
+	replicationOps int64
 	
 	// Shutdown coordination
 	ctx    context.Context
@@ -77,8 +104,10 @@ It acts as a sidecar process that handles replication and coordination automatic
 	rootCmd.Flags().StringVar(&config.AdvertiseURL, "advertise-url", "", "URL for other nodes to access this node")
 	rootCmd.Flags().StringVar(&config.DataDir, "data-dir", "./data", "Data directory for databases")
 	rootCmd.Flags().StringVar(&config.HTTPAddr, "http-addr", DefaultHTTPAddr, "HTTP server address")
+	rootCmd.Flags().StringVar(&config.CoordinationBackend, "coordination", "consul", "Coordination backend: 'consul' or 'http'")
 	rootCmd.Flags().StringVar(&config.ConsulURL, "consul-url", DefaultConsulURL, "Consul server URL")
 	rootCmd.Flags().StringVar(&config.LeaseKey, "lease-key", DefaultLeaseKey, "Consul key for lease coordination")
+	rootCmd.Flags().StringVar(&config.CoordinatorURL, "coordinator-url", "", "HTTP coordinator URL (for http coordination backend)")
 	rootCmd.Flags().StringSliceVar(&config.ReplicationTargets, "targets", []string{}, "Replication target nodes")
 	rootCmd.Flags().BoolVar(&config.AutoStart, "auto-start", false, "Auto-start mode (launched by injection library)")
 	
@@ -138,13 +167,27 @@ func (s *Server) initialize() error {
 		return fmt.Errorf("failed to create data directory: %w", err)
 	}
 	
-	// Initialize lease manager
-	s.leaseManager = lease.NewManager(
-		s.config.ConsulURL,
-		s.config.LeaseKey,
-		s.config.Hostname,
-		s.config.AdvertiseURL,
-	)
+	// Initialize lease manager based on backend choice
+	switch s.config.CoordinationBackend {
+	case "http":
+		s.logger.Info("Using HTTP coordination backend")
+		s.leaseManager = lease.NewHTTPManager(
+			s.config.CoordinatorURL,
+			s.config.LeaseKey,
+			s.config.Hostname,
+			s.config.AdvertiseURL,
+		)
+	case "consul":
+		s.logger.Info("Using Consul coordination backend")
+		s.leaseManager = lease.NewManager(
+			s.config.ConsulURL,
+			s.config.LeaseKey,
+			s.config.Hostname,
+			s.config.AdvertiseURL,
+		)
+	default:
+		return fmt.Errorf("unknown coordination backend: %s (use 'consul' or 'http')", s.config.CoordinationBackend)
+	}
 	
 	if err := s.leaseManager.Open(); err != nil {
 		return fmt.Errorf("failed to initialize lease manager: %w", err)
@@ -153,11 +196,87 @@ func (s *Server) initialize() error {
 	// Initialize replicator
 	s.replicator = replication.NewHybridReplicator(s.config.ReplicationTargets)
 	
+	// Initialize IPC reader
+	s.ipcReader = ipc.NewSharedMemoryReader()
+	s.setupIPCCallbacks()
+	
 	// Set up HTTP server
 	s.setupHTTPServer()
 	
 	s.logger.Info("DistSQLite sidecar initialized successfully")
 	return nil
+}
+
+func (s *Server) setupIPCCallbacks() {
+	// Handle write events from VFS
+	s.ipcReader.SetWriteCallback(func(event ipc.WriteEvent) error {
+		s.writeEvents++
+		
+		// Only process writes if we're the primary
+		if !s.leaseManager.IsLeaseHolder() {
+			s.logger.Debug("Ignoring write event - not primary",
+				zap.String("path", event.Path),
+				zap.Int64("offset", event.Offset),
+			)
+			return nil
+		}
+		
+		// Validate fence token
+		fenceToken := s.leaseManager.GetCurrentFenceToken()
+		if err := s.leaseManager.ValidateWrite(fenceToken); err != nil {
+			s.logger.Error("Write validation failed", zap.Error(err))
+			return err
+		}
+		
+		// Record the change in the replication engine
+		changeType := "write"
+		if event.IsWAL {
+			changeType = "wal_write"
+		}
+		
+		return s.replicator.RecordChange(event.Path, changeType, int64(event.Length), event.Data)
+	})
+	
+	// Handle batch completion events
+	s.ipcReader.SetBatchCallback(func() error {
+		s.batchEvents++
+		
+		if !s.leaseManager.IsLeaseHolder() {
+			return nil // Not primary, ignore
+		}
+		
+		s.logger.Debug("Write batch completed, triggering replication")
+		// Batch completion is handled automatically by the replication engine
+		return nil
+	})
+	
+	// Handle sync events
+	s.ipcReader.SetSyncCallback(func(path string) error {
+		if !s.leaseManager.IsLeaseHolder() {
+			return nil // Not primary, ignore
+		}
+		
+		s.logger.Debug("Database sync event", zap.String("path", path))
+		
+		// Sync events are good replication trigger points
+		// The replication engine will decide the optimal strategy
+		s.replicationOps++
+		return nil
+	})
+	
+	// Handle truncate events
+	s.ipcReader.SetTruncateCallback(func(path string, size int64) error {
+		if !s.leaseManager.IsLeaseHolder() {
+			return nil // Not primary, ignore
+		}
+		
+		s.logger.Info("Database truncated", 
+			zap.String("path", path),
+			zap.Int64("size", size),
+		)
+		
+		return s.replicator.RecordChange(path, "truncate", size, nil)
+	})
 }
 
 func (s *Server) start() error {
@@ -166,6 +285,14 @@ func (s *Server) start() error {
 	// Start replicator
 	if err := s.replicator.Start(); err != nil {
 		return fmt.Errorf("failed to start replicator: %w", err)
+	}
+	
+	// Start IPC reader
+	if err := s.ipcReader.Start(); err != nil {
+		s.logger.Warn("Failed to start IPC reader", zap.Error(err))
+		// Continue without IPC - degraded mode
+	} else {
+		s.logger.Info("IPC reader started successfully")
 	}
 	
 	// Start HTTP server
@@ -217,9 +344,12 @@ func (s *Server) handleLeaseCheck() {
 		}
 		
 		if lease.Holder == s.config.Hostname {
-			s.logger.Info("Acquired primary lease")
+			s.logger.Info("Acquired primary lease", 
+				zap.Int64("fence_token", lease.FenceToken))
 		} else {
-			s.logger.Debug("Current lease holder", zap.String("holder", lease.Holder))
+			s.logger.Debug("Current lease holder", 
+				zap.String("holder", lease.Holder),
+				zap.Int64("fence_token", lease.FenceToken))
 		}
 	}
 }
@@ -239,6 +369,9 @@ func (s *Server) setupHTTPServer() {
 	// Lease information endpoint
 	mux.HandleFunc("/lease", s.handleLease)
 	
+	// IPC stats endpoint
+	mux.HandleFunc("/ipc", s.handleIPCStats)
+	
 	s.httpServer = &http.Server{
 		Addr:    s.config.HTTPAddr,
 		Handler: mux,
@@ -254,12 +387,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// Check if replicator is healthy
 	healthy := s.replicator.IsHealthy()
 	
-	if healthy {
+	// Check if IPC is working
+	ipcHealthy := s.ipcReader != nil
+	
+	if healthy && ipcHealthy {
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"status": "healthy", "timestamp": "%s"}`, time.Now().Format(time.RFC3339))
+		fmt.Fprintf(w, `{"status": "healthy", "timestamp": "%s", "ipc": true}`, time.Now().Format(time.RFC3339))
 	} else {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		fmt.Fprintf(w, `{"status": "unhealthy", "timestamp": "%s"}`, time.Now().Format(time.RFC3339))
+		fmt.Fprintf(w, `{"status": "unhealthy", "timestamp": "%s", "ipc": %t}`, 
+			time.Now().Format(time.RFC3339), ipcHealthy)
 	}
 }
 
@@ -271,9 +408,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	
 	isPrimary := s.leaseManager.IsLeaseHolder()
 	currentLeaseHolder := "unknown"
+	fenceToken := int64(0)
 	
 	if lease, err := s.leaseManager.GetCurrentLease(r.Context()); err == nil {
 		currentLeaseHolder = lease.Holder
+		fenceToken = lease.FenceToken
 	}
 	
 	w.Header().Set("Content-Type", "application/json")
@@ -281,11 +420,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"hostname": "%s",
 		"is_primary": %t,
 		"current_primary": "%s",
+		"fence_token": %d,
 		"advertise_url": "%s",
 		"replicator_healthy": %t,
+		"write_events": %d,
+		"batch_events": %d,
+		"replication_ops": %d,
 		"timestamp": "%s"
-	}`, s.config.Hostname, isPrimary, currentLeaseHolder, s.config.AdvertiseURL, 
-		s.replicator.IsHealthy(), time.Now().Format(time.RFC3339))
+	}`, s.config.Hostname, isPrimary, currentLeaseHolder, fenceToken, s.config.AdvertiseURL, 
+		s.replicator.IsHealthy(), s.writeEvents, s.batchEvents, s.replicationOps,
+		time.Now().Format(time.RFC3339))
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -299,8 +443,14 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
 	// Simple JSON serialization for now
-	fmt.Fprintf(w, `{"databases": %d, "timestamp": "%s"}`, 
-		len(stats), time.Now().Format(time.RFC3339))
+	fmt.Fprintf(w, `{
+		"databases": %d, 
+		"write_events": %d,
+		"batch_events": %d,
+		"replication_ops": %d,
+		"timestamp": "%s"
+	}`, len(stats), s.writeEvents, s.batchEvents, s.replicationOps,
+		time.Now().Format(time.RFC3339))
 }
 
 func (s *Server) handleLease(w http.ResponseWriter, r *http.Request) {
@@ -320,10 +470,42 @@ func (s *Server) handleLease(w http.ResponseWriter, r *http.Request) {
 		"holder": "%s",
 		"expires_at": "%s",
 		"generation": %d,
+		"fence_token": %d,
 		"region": "%s",
-		"advertise_url": "%s"
+		"advertise_url": "%s",
+		"acquired_at": "%s"
 	}`, lease.Holder, lease.ExpiresAt.Format(time.RFC3339), 
-		lease.Generation, lease.Region, lease.AdvertiseURL)
+		lease.Generation, lease.FenceToken, lease.Region, lease.AdvertiseURL,
+		lease.AcquiredAt.Format(time.RFC3339))
+}
+
+func (s *Server) handleIPCStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	if s.ipcReader == nil {
+		http.Error(w, "IPC reader not initialized", http.StatusServiceUnavailable)
+		return
+	}
+	
+	stats := s.ipcReader.GetStats()
+	
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{
+		"shm_id": %v,
+		"shm_addr": "%v",
+		"shm_size": %v,
+		"active": %t,
+		"queue_head": %v,
+		"queue_tail": %v,
+		"queue_size": %v,
+		"queue_capacity": %v,
+		"timestamp": "%s"
+	}`, stats["shm_id"], stats["shm_addr"], stats["shm_size"], stats["active"],
+		stats["queue_head"], stats["queue_tail"], stats["queue_size"], stats["queue_capacity"],
+		time.Now().Format(time.RFC3339))
 }
 
 func (s *Server) waitForShutdown() {
@@ -351,6 +533,13 @@ func (s *Server) shutdown() error {
 		
 		if err := s.httpServer.Shutdown(ctx); err != nil {
 			s.logger.Error("Failed to shutdown HTTP server", zap.Error(err))
+		}
+	}
+	
+	// Stop IPC reader
+	if s.ipcReader != nil {
+		if err := s.ipcReader.Stop(); err != nil {
+			s.logger.Error("Failed to stop IPC reader", zap.Error(err))
 		}
 	}
 	

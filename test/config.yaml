@@ -1,0 +1,101 @@
+# DistSQLite Test Configuration
+# This file configures test behavior and thresholds
+
+test_settings:
+  # Test timeouts
+  unit_test_timeout: "30s"
+  integration_test_timeout: "60s"
+  benchmark_timeout: "120s"
+  
+  # Performance thresholds
+  performance:
+    min_ipc_events_per_sec: 100000
+    max_failover_time: "1s"
+    min_bulk_sync_speedup: 5.0  # Should be 5x faster than baseline
+    
+  # Concurrency settings
+  concurrency:
+    max_writers: 20
+    writes_per_worker: 1000
+    contention_retry_limit: 3
+    
+  # Error injection settings
+  error_injection:
+    corruption_test_enabled: true
+    network_failure_test_enabled: true
+    disk_full_test_enabled: false  # Disabled by default (destructive)
+    
+  # Split-brain prevention
+  split_brain:
+    fence_token_required: true
+    max_lease_holders: 1
+    lease_timeout: "5s"
+
+# Test data configurations
+test_data:
+  small_dataset:
+    rows: 1000
+    bytes_per_row: 100
+    
+  medium_dataset:
+    rows: 10000
+    bytes_per_row: 1024
+    
+  large_dataset:
+    rows: 100000
+    bytes_per_row: 100
+    
+  huge_dataset:
+    rows: 1000000
+    bytes_per_row: 100
+
+# Database configurations for testing
+database_configs:
+  wal_mode:
+    journal_mode: "WAL"
+    synchronous: "NORMAL"
+    cache_size: 2000
+    
+  delete_mode:
+    journal_mode: "DELETE"
+    synchronous: "FULL"
+    cache_size: 1000
+    
+  memory_mode:
+    journal_mode: "MEMORY"
+    synchronous: "OFF"
+    cache_size: 10000
+
+# Network test configurations
+network_tests:
+  slow_network:
+    latency: "100ms"
+    bandwidth: "1Mbps"
+    
+  unstable_network:
+    packet_loss: 0.1
+    jitter: "50ms"
+    
+  partition_test:
+    partition_duration: "5s"
+    recovery_time: "2s"
+
+# Expected performance metrics (for validation)
+performance_targets:
+  # These are targets based on the "10-100x faster" claim
+  bulk_insert_speedup:
+    small: 10.0   # 10x faster for small datasets
+    medium: 50.0  # 50x faster for medium datasets  
+    large: 100.0  # 100x faster for large datasets
+    
+  replication_latency:
+    target_p95: "100ms"
+    target_p99: "500ms"
+    
+  concurrent_throughput:
+    single_writer: "10000 ops/sec"
+    multi_writer: "5000 ops/sec"
+    
+  memory_usage:
+    max_overhead: "50MB"
+    shared_memory_size: "10MB"
