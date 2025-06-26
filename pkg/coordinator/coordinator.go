@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sync"
 	"time"
 
 	"distsqlite/pkg/rsync"
+	"distsqlite/pkg/leaseserver"
 )
 
 // Node represents a cluster node
@@ -51,6 +53,10 @@ type Coordinator struct {
 	// HTTP rsync servers (per database)
 	httpRsyncServers map[string]*rsync.HTTPRsyncServer
 	
+	// Centralized lease server
+	leaseServer    *leaseserver.LeaseServer
+	leaseServerPort int
+	
 	// Configuration
 	nodeTimeout    time.Duration
 	cleanupTicker  *time.Ticker
@@ -59,7 +65,7 @@ type Coordinator struct {
 }
 
 // NewCoordinator creates a new coordinator instance
-func NewCoordinator() *Coordinator {
+func NewCoordinator(leaseServerPort int, dbPath string) *Coordinator {
 	ctx, cancel := context.WithCancel(context.Background())
 	
 	c := &Coordinator{
@@ -67,10 +73,14 @@ func NewCoordinator() *Coordinator {
 		leaseEvents:      make([]LeaseEvent, 0),
 		replicationJobs:  make(map[string]*ReplicationRequest),
 		httpRsyncServers: make(map[string]*rsync.HTTPRsyncServer),
+		leaseServerPort:  leaseServerPort,
 		nodeTimeout:      30 * time.Second,
 		ctx:              ctx,
 		cancel:           cancel,
 	}
+	
+	// Create embedded lease server
+	c.leaseServer = leaseserver.NewLeaseServer(leaseServerPort, dbPath)
 	
 	// Start background cleanup
 	c.cleanupTicker = time.NewTicker(10 * time.Second)
@@ -81,6 +91,17 @@ func NewCoordinator() *Coordinator {
 
 // Start begins the coordinator HTTP server
 func (c *Coordinator) Start(addr string) error {
+	// Start embedded lease server first
+	go func() {
+		log.Printf("[DistSQLite Coordinator] Starting embedded lease server on port %d", c.leaseServerPort)
+		if err := c.leaseServer.Start(); err != nil {
+			log.Printf("[DistSQLite Coordinator] Lease server error: %v", err)
+		}
+	}()
+	
+	// Give lease server time to start
+	time.Sleep(100 * time.Millisecond)
+	
 	mux := http.NewServeMux()
 	
 	// Cluster management endpoints
@@ -97,6 +118,9 @@ func (c *Coordinator) Start(addr string) error {
 	mux.HandleFunc("/rsync", c.handleHTTPRsync)
 	mux.HandleFunc("/rsync/", c.handleHTTPRsync)
 	
+	// Lease server proxy endpoints
+	mux.HandleFunc("/lease/", c.handleLeaseProxy)
+	
 	// Health and status
 	mux.HandleFunc("/health", c.handleHealth)
 	mux.HandleFunc("/status", c.handleStatus)
@@ -107,6 +131,7 @@ func (c *Coordinator) Start(addr string) error {
 	}
 	
 	log.Printf("[DistSQLite Coordinator] Starting on %s", addr)
+	log.Printf("[DistSQLite Coordinator] Lease server available at :%d", c.leaseServerPort)
 	return server.ListenAndServe()
 }
 
@@ -115,6 +140,9 @@ func (c *Coordinator) Stop() error {
 	c.cancel()
 	if c.cleanupTicker != nil {
 		c.cleanupTicker.Stop()
+	}
+	if c.leaseServer != nil {
+		c.leaseServer.Stop()
 	}
 	return nil
 }
@@ -373,6 +401,50 @@ func (c *Coordinator) handleHTTPRsync(w http.ResponseWriter, r *http.Request) {
 	server.HandleRsync(w, r)
 }
 
+// handleLeaseProxy proxies lease requests to the embedded lease server
+func (c *Coordinator) handleLeaseProxy(w http.ResponseWriter, r *http.Request) {
+	// Forward requests to embedded lease server
+	proxyURL := fmt.Sprintf("http://localhost:%d%s", c.leaseServerPort, r.URL.Path)
+	
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest(r.Method, proxyURL, r.Body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Proxy error: %v", err), http.StatusInternalServerError)
+		return
+	}
+	
+	// Copy headers
+	for key, values := range r.Header {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+	
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Lease server unavailable: %v", err), http.StatusServiceUnavailable)
+		return
+	}
+	defer resp.Body.Close()
+	
+	// Copy response headers
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	
+	w.WriteHeader(resp.StatusCode)
+	
+	// Copy response body
+	if resp.Body != nil {
+		_, err = io.Copy(w, resp.Body)
+		if err != nil {
+			log.Printf("Error copying lease response: %v", err)
+		}
+	}
+}
+
 // handleStatus returns detailed coordinator status
 func (c *Coordinator) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -385,14 +457,15 @@ func (c *Coordinator) handleStatus(w http.ResponseWriter, r *http.Request) {
 	
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"service":        "distsqlite-coordinator",
-		"version":        "1.0.0",
-		"nodes":          len(c.nodes),
-		"events":         len(c.leaseEvents),
-		"pending_jobs":   len(c.replicationJobs),
-		"rsync_servers":  len(c.httpRsyncServers),
-		"uptime_seconds": int(time.Since(time.Now()).Seconds()),
-		"timestamp":      time.Now().Format(time.RFC3339),
+		"service":         "distsqlite-coordinator",
+		"version":         "1.0.0",
+		"nodes":           len(c.nodes),
+		"events":          len(c.leaseEvents),
+		"pending_jobs":    len(c.replicationJobs),
+		"rsync_servers":   len(c.httpRsyncServers),
+		"lease_server_port": c.leaseServerPort,
+		"uptime_seconds":  int(time.Since(time.Now()).Seconds()),
+		"timestamp":       time.Now().Format(time.RFC3339),
 	})
 }
 

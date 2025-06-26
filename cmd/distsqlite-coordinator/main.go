@@ -12,8 +12,10 @@ import (
 
 func main() {
 	var (
-		addr = flag.String("addr", ":9090", "HTTP server address")
-		help = flag.Bool("help", false, "Show help")
+		addr           = flag.String("addr", ":9090", "HTTP server address")
+		leaseServerPort = flag.Int("lease-port", 8080, "Embedded lease server port")
+		dbPath         = flag.String("db", "main.db", "Path to authoritative database")
+		help           = flag.Bool("help", false, "Show help")
 	)
 	flag.Parse()
 
@@ -23,9 +25,11 @@ func main() {
 	}
 
 	log.Printf("Starting DistSQLite HTTP Coordinator on %s", *addr)
+	log.Printf("Embedded lease server will run on port %d", *leaseServerPort)
+	log.Printf("Managing database: %s", *dbPath)
 
-	// Create coordinator
-	coord := coordinator.NewCoordinator()
+	// Create coordinator with embedded lease server
+	coord := coordinator.NewCoordinator(*leaseServerPort, *dbPath)
 
 	// Start coordinator in goroutine
 	go func() {

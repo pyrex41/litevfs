@@ -15,7 +15,8 @@
       "Bash(gcc:*)",
       "Bash(mkdir:*)",
       "Bash(chmod:*)",
-      "Bash(mv:*)"
+      "Bash(mv:*)",
+      "Bash(curl:*)"
     ],
     "deny": []
   }
