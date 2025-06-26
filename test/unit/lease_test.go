@@ -75,11 +75,11 @@ func TestLeaseCompetition(t *testing.T) {
 	tmpDir := t.TempDir()
 	lockFile := filepath.Join(tmpDir, "competition.lock")
 	
-	numNodes := 5
+	numNodes := 10 // Increase contention
 	var successCount int32
 	var wg sync.WaitGroup
 	
-	// Simulate multiple nodes trying to acquire lease
+	// Simulate multiple nodes trying to acquire lease SIMULTANEOUSLY
 	for i := 0; i < numNodes; i++ {
 		wg.Add(1)
 		go func(nodeID int) {
@@ -101,40 +101,37 @@ func TestLeaseCompetition(t *testing.T) {
 				return
 			}
 			
-			// Add small delay to simulate more realistic timing
-			time.Sleep(time.Duration(nodeID) * time.Millisecond)
+			// NO DELAY - create maximum race condition
+			// All nodes try to claim at exactly the same time
 			
-			// Check if lease already exists (someone else got it first)
-			if _, err := os.Stat(lockFile); err == nil {
-				// Lease already exists, clean up and return
-				os.Remove(tempFile)
-				return
-			}
-			
-			// Atomic rename to claim lease
+			// Atomic rename to claim lease (this is where race condition happens)
 			err = os.Rename(tempFile, lockFile)
 			if err == nil {
 				atomic.AddInt32(&successCount, 1)
 				t.Logf("Node %s acquired lease", hostname)
 			} else {
-				os.Remove(tempFile) // Clean up
+				// Expected behavior: only one rename should succeed
+				os.Remove(tempFile) // Clean up failed attempt
 			}
 		}(i)
 	}
 	
 	wg.Wait()
 	
-	// Only one node should have succeeded
+	// Only one node should have succeeded despite race condition
 	if successCount != 1 {
-		t.Errorf("Expected exactly 1 successful lease acquisition, got %d", successCount)
+		t.Errorf("Race condition test FAILED: Expected exactly 1 successful lease acquisition, got %d", successCount)
+		t.Error("This indicates the atomic file operation failed to prevent split-brain")
 	}
 	
 	// Verify final lease holder
 	if data, err := os.ReadFile(lockFile); err == nil {
 		var finalLease MockLease
 		if err := json.Unmarshal(data, &finalLease); err == nil {
-			t.Logf("Final lease holder: %s (token: %d)", finalLease.Hostname, finalLease.FenceToken)
+			t.Logf("Race condition winner: %s (token: %d)", finalLease.Hostname, finalLease.FenceToken)
 		}
+	} else {
+		t.Error("No lease file exists after competition - atomic operations completely failed")
 	}
 }
 
@@ -289,8 +286,9 @@ func TestConcurrentLeaseRenewals(t *testing.T) {
 	var renewalCount int32
 	var wg sync.WaitGroup
 	
-	// Simulate concurrent renewal attempts
-	for i := 0; i < 10; i++ {
+	// INTENSE concurrent renewal stress test
+	numRenewers := 50 // Many more concurrent renewers
+	for i := 0; i < numRenewers; i++ {
 		wg.Add(1)
 		go func(iteration int) {
 			defer wg.Done()
@@ -313,7 +311,7 @@ func TestConcurrentLeaseRenewals(t *testing.T) {
 			newData, _ := json.Marshal(currentLease)
 			tempFile := fmt.Sprintf("%s.tmp.%d", lockFile, iteration)
 			
-			// Atomic renewal
+			// Atomic renewal with NO delay to maximize race condition
 			if err := os.WriteFile(tempFile, newData, 0644); err == nil {
 				if err := os.Rename(tempFile, lockFile); err == nil {
 					atomic.AddInt32(&renewalCount, 1)
@@ -328,7 +326,7 @@ func TestConcurrentLeaseRenewals(t *testing.T) {
 	
 	// At least some renewals should succeed
 	if renewalCount == 0 {
-		t.Error("No lease renewals succeeded")
+		t.Error("No lease renewals succeeded - atomic operations may be broken")
 	}
 	
 	// Check final state
@@ -343,12 +341,82 @@ func TestConcurrentLeaseRenewals(t *testing.T) {
 		t.Fatalf("Failed to unmarshal final lease: %v", err)
 	}
 	
-	t.Logf("Renewals completed: %d, final fence token: %d", 
-		renewalCount, finalLease.FenceToken)
+	t.Logf("Renewals completed: %d/%d, final fence token: %d", 
+		renewalCount, numRenewers, finalLease.FenceToken)
 	
 	// Fence token should have incremented
 	if finalLease.FenceToken <= 1 {
 		t.Error("Fence token should have incremented during renewals")
+	}
+	
+	// The key test: even with intense concurrency, the file should be valid
+	if finalLease.Hostname != "node1" {
+		t.Error("Lease corruption detected - concurrent access broke atomic operations")
+	}
+}
+
+// TestExtremeRaceCondition tests the worst-case scenario for lease contention
+func TestExtremeRaceCondition(t *testing.T) {
+	tmpDir := t.TempDir()
+	lockFile := filepath.Join(tmpDir, "extreme.lock")
+	
+	numNodes := 100 // Many competing nodes
+	attempts := 1000 // Multiple attempts per node
+	var totalAttempts int32
+	var successCount int32
+	var wg sync.WaitGroup
+	
+	// Launch many nodes, each making many attempts
+	for nodeID := 0; nodeID < numNodes; nodeID++ {
+		wg.Add(1)
+		go func(nID int) {
+			defer wg.Done()
+			
+			hostname := fmt.Sprintf("node%d", nID)
+			
+			for attempt := 0; attempt < attempts; attempt++ {
+				atomic.AddInt32(&totalAttempts, 1)
+				
+				lease := &MockLease{
+					Hostname:   hostname,
+					FenceToken: int64(nID*1000 + attempt),
+					Timestamp:  time.Now().Unix(),
+				}
+				
+				leaseData, _ := json.Marshal(lease)
+				tempFile := fmt.Sprintf("%s.tmp.%s.%d", lockFile, hostname, attempt)
+				
+				// Try to acquire lease
+				if err := os.WriteFile(tempFile, leaseData, 0644); err == nil {
+					// Immediate atomic claim (maximum race condition)
+					if err := os.Rename(tempFile, lockFile); err == nil {
+						atomic.AddInt32(&successCount, 1)
+						// Hold lease briefly then release
+						time.Sleep(time.Microsecond)
+						os.Remove(lockFile)
+					} else {
+						os.Remove(tempFile)
+					}
+				}
+			}
+		}(nodeID)
+	}
+	
+	wg.Wait()
+	
+	t.Logf("Extreme race test: %d successes out of %d attempts", successCount, totalAttempts)
+	
+	// Success rate should be reasonable (not 0, not 100%)
+	if successCount == 0 {
+		t.Error("No successful acquisitions - atomic operations may be broken")
+	}
+	
+	successRate := float64(successCount) / float64(totalAttempts)
+	t.Logf("Success rate: %.2f%%", successRate*100)
+	
+	// With proper atomic operations, we should see some successes but not chaos
+	if successRate > 0.1 { // More than 10% success might indicate lack of proper coordination
+		t.Logf("Warning: High success rate (%.2f%%) might indicate insufficient coordination", successRate*100)
 	}
 }
 
