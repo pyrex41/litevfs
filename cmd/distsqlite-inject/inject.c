@@ -9,8 +9,8 @@
 #include <signal.h>
 #include <pthread.h>
 
-// Forward declaration from our VFS
-extern int distVFSInit(void *goCallbacks);
+// OCaml VFS initialization (from the OCaml distcore library)
+extern int distcore_init(void);
 
 // Function pointers to the real SQLite functions
 static int (*real_sqlite3_open_v2)(const char*, void**, int, const char*) = NULL;
@@ -20,6 +20,9 @@ static int (*real_sqlite3_open16)(const void*, void**) = NULL;
 // Sidecar process PID
 static pid_t sidecar_pid = 0;
 static pthread_mutex_t sidecar_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// OCaml VFS initialization state
+static int ocaml_vfs_initialized = 0;
 
 // Check if sidecar is running
 static int sidecarRunning(void) {
@@ -50,14 +53,20 @@ static int startSidecar(void) {
     pid_t pid = fork();
     if (pid == 0) {
         // Child process - exec the sidecar
-        char *argv[] = {"distsqlite", "--auto-start", NULL};
-        execvp("distsqlite", argv);
+        char *argv[] = {"distsqlite-zmq", "--mode", "node", "--endpoints", "tcp://localhost:5555", "--node-id", "auto", "--auto-start", NULL};
+        execvp("distsqlite-zmq", argv);
         
         // If execvp fails, try from common paths
-        execv("/usr/local/bin/distsqlite", argv);
-        execv("./build/distsqlite", argv);
+        execv("/usr/local/bin/distsqlite-zmq", argv);
+        execv("./build/distsqlite-zmq", argv);
         
-        fprintf(stderr, "[DistSQLite] Failed to start sidecar process\n");
+        // Fallback to regular distsqlite
+        char *fallback_argv[] = {"distsqlite", "--auto-start", NULL};
+        execvp("distsqlite", fallback_argv);
+        execv("/usr/local/bin/distsqlite", fallback_argv);
+        execv("./build/distsqlite", fallback_argv);
+        
+        fprintf(stderr, "[DistSQLite] Failed to start any sidecar process\n");
         _exit(1);
     } else if (pid > 0) {
         // Parent process
@@ -65,7 +74,7 @@ static int startSidecar(void) {
         printf("[DistSQLite] Sidecar started with PID %d\n", sidecar_pid);
         
         // Give sidecar a moment to initialize
-        usleep(100000); // 100ms
+        usleep(200000); // 200ms for OCaml initialization
         
         pthread_mutex_unlock(&sidecar_mutex);
         return 1;
@@ -77,13 +86,30 @@ static int startSidecar(void) {
     }
 }
 
+// Initialize OCaml VFS
+static int initializeOCamlVFS(void) {
+    if (ocaml_vfs_initialized) return 1;
+    
+    printf("[DistSQLite] Initializing OCaml VFS engine...\n");
+    
+    // Initialize the OCaml distcore library
+    if (distcore_init() != 0) {
+        fprintf(stderr, "[DistSQLite] Failed to initialize OCaml distcore\n");
+        return 0;
+    }
+    
+    ocaml_vfs_initialized = 1;
+    printf("[DistSQLite] OCaml VFS engine initialized successfully\n");
+    return 1;
+}
+
 // Initialize our interception
 static void initializeDistSQLite(void) {
     static int initialized = 0;
     if (initialized) return;
     initialized = 1;
     
-    printf("[DistSQLite] Initializing zero-change SQLite distribution...\n");
+    printf("[DistSQLite] Initializing zero-change SQLite distribution with OCaml VFS...\n");
     
     // Load real SQLite functions
     real_sqlite3_open_v2 = dlsym(RTLD_NEXT, "sqlite3_open_v2");
@@ -95,10 +121,10 @@ static void initializeDistSQLite(void) {
         return;
     }
     
-    // Initialize our VFS
-    if (distVFSInit(NULL) != 0) {
-        fprintf(stderr, "[DistSQLite] Failed to initialize VFS\n");
-        return;
+    // Initialize OCaml VFS
+    if (!initializeOCamlVFS()) {
+        fprintf(stderr, "[DistSQLite] Warning: OCaml VFS initialization failed\n");
+        // Continue anyway - might work with basic functionality
     }
     
     // Start sidecar process
@@ -114,14 +140,12 @@ static void initializeDistSQLite(void) {
 int sqlite3_open_v2(const char *filename, void **ppDb, int flags, const char *zVfs) {
     initializeDistSQLite();
     
-    // Force our VFS if not specified or if default is requested
-    if (!zVfs || strcmp(zVfs, "unix") == 0 || strcmp(zVfs, "") == 0) {
-        printf("[DistSQLite] Intercepted sqlite3_open_v2 for %s, using DistSQLite VFS\n", 
-               filename ? filename : "<memory>");
-        zVfs = "distsqlite";
-    }
+    // Note: With OCaml VFS, we don't force a specific VFS name
+    // Instead, the OCaml system handles VFS registration and interception
+    printf("[DistSQLite] Intercepted sqlite3_open_v2 for %s\n", 
+           filename ? filename : "<memory>");
     
-    // Call the real function with our VFS
+    // Call the real function - OCaml VFS will intercept at the C level
     return real_sqlite3_open_v2(filename, ppDb, flags, zVfs);
 }
 
@@ -129,23 +153,20 @@ int sqlite3_open_v2(const char *filename, void **ppDb, int flags, const char *zV
 int sqlite3_open(const char *filename, void **ppDb) {
     initializeDistSQLite();
     
-    printf("[DistSQLite] Intercepted sqlite3_open for %s, using DistSQLite VFS\n", 
+    printf("[DistSQLite] Intercepted sqlite3_open for %s\n", 
            filename ? filename : "<memory>");
     
-    // Call sqlite3_open_v2 with our VFS
-    return sqlite3_open_v2(filename, ppDb, 
-                          2 | 64, // SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
-                          "distsqlite");
+    // Call the real function - OCaml VFS will intercept at the C level
+    return real_sqlite3_open(filename, ppDb);
 }
 
 // Intercepted sqlite3_open16 function
 int sqlite3_open16(const void *filename, void **ppDb) {
     initializeDistSQLite();
     
-    // For UTF-16, we can't easily print the filename, but we can still intercept
-    printf("[DistSQLite] Intercepted sqlite3_open16, using DistSQLite VFS\n");
+    printf("[DistSQLite] Intercepted sqlite3_open16\n");
     
-    // SQLite will convert UTF-16 to UTF-8 internally, then call our sqlite3_open_v2
+    // Call the real function - OCaml VFS will intercept at the C level
     return real_sqlite3_open16(filename, ppDb);
 }
 
