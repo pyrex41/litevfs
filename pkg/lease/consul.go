@@ -403,12 +403,14 @@ func (m *Manager) initializeFenceCounter() error {
 	}
 	
 	// Initialize our counter to be higher than any existing fence token
+	// Use a much larger gap (100,000) to handle high-concurrency scenarios
+	// and prevent potential race conditions
 	if lease.FenceToken > m.fenceCounter {
-		atomic.StoreInt64(&m.fenceCounter, lease.FenceToken+1000)
+		atomic.StoreInt64(&m.fenceCounter, lease.FenceToken+100000)
 	}
 	
 	m.lastFenceToken = lease.FenceToken
-	log.Printf("[DistSQLite Lease] Initialized fence counter to %d", m.fenceCounter)
+	log.Printf("[DistSQLite Lease] Initialized fence counter to %d (gap: 100k for safety)", m.fenceCounter)
 	return nil
 }
 
