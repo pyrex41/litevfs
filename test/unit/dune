@@ -1,0 +1,6 @@
+(executable
+ (public_name ocaml_unit_test)
+ (name ocaml_unit_test)
+ (libraries distcore alcotest bigarray)
+ (instrumentation (backend bisect_ppx))
+)
