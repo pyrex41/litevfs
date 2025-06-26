@@ -384,6 +384,292 @@ value distcore_hash_simd_stub(value v_data, value v_offset, value v_len) {
     CAMLreturn(caml_copy_int32(hash));
 }
 
+/* VFS Integration Support */
+#include <sqlite3.h>
+
+/* Extended file structure with OCaml integration */
+typedef struct {
+    sqlite3_file base;
+    value ocaml_file;
+    int page_size;
+    bool intercept_enabled;
+    char* db_path;
+} ocaml_vfs_file;
+
+/* Page tracker operations */
+void* distcore_create_page_tracker(int page_size) {
+    CAMLparam0();
+    CAMLlocal1(result);
+    
+    static value *create_func = NULL;
+    if (!create_func) {
+        create_func = caml_named_value("create_page_tracker");
+        if (!create_func) {
+            CAMLreturnT(void*, NULL);
+        }
+    }
+    
+    result = caml_callback(*create_func, Val_int(page_size));
+    CAMLreturnT(void*, (void*)result);
+}
+
+/* VFS file operations */
+static int vfs_close(sqlite3_file *pFile) {
+    ocaml_vfs_file *file = (ocaml_vfs_file*)pFile;
+    if (file->db_path) {
+        free(file->db_path);
+    }
+    return SQLITE_OK;
+}
+
+static int vfs_read(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst) {
+    ocaml_vfs_file *file = (ocaml_vfs_file*)pFile;
+    
+    if (file->intercept_enabled) {
+        CAMLparam0();
+        CAMLlocal3(result, buffer, ml_file);
+        
+        /* Create Bigarray for buffer */
+        intnat dims[1] = {iAmt};
+        buffer = caml_ba_alloc(CAML_BA_UINT8 | CAML_BA_C_LAYOUT, 1, zBuf, dims);
+        
+        ml_file = file->ocaml_file;
+        
+        static value *read_func = NULL;
+        if (!read_func) {
+            read_func = caml_named_value("vfs_intercept_read");
+            if (!read_func) {
+                CAMLreturnT(int, SQLITE_IOERR_READ);
+            }
+        }
+        
+        result = caml_callback3(*read_func, ml_file, buffer, caml_copy_int64(iOfst));
+        
+        if (Is_exception_result(result)) {
+            CAMLreturnT(int, SQLITE_IOERR_READ);
+        }
+        
+        int bytes_read = Int_val(result);
+        if (bytes_read == iAmt) {
+            CAMLreturnT(int, SQLITE_OK);
+        } else if (bytes_read < iAmt) {
+            /* Partial read - zero out remaining buffer */
+            memset((char*)zBuf + bytes_read, 0, iAmt - bytes_read);
+            CAMLreturnT(int, SQLITE_IOERR_SHORT_READ);
+        }
+        
+        CAMLreturnT(int, SQLITE_OK);
+    }
+    
+    /* Fall back to default implementation */
+    return SQLITE_IOERR_READ;
+}
+
+static int vfs_write(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 iOfst) {
+    ocaml_vfs_file *file = (ocaml_vfs_file*)pFile;
+    
+    if (file->intercept_enabled) {
+        CAMLparam0();
+        CAMLlocal3(result, buffer, ml_file);
+        
+        /* Create Bigarray for buffer */
+        intnat dims[1] = {iAmt};
+        buffer = caml_ba_alloc(CAML_BA_UINT8 | CAML_BA_C_LAYOUT, 1, (void*)zBuf, dims);
+        
+        ml_file = file->ocaml_file;
+        
+        static value *write_func = NULL;
+        if (!write_func) {
+            write_func = caml_named_value("vfs_intercept_write");
+            if (!write_func) {
+                CAMLreturnT(int, SQLITE_IOERR_WRITE);
+            }
+        }
+        
+        result = caml_callback3(*write_func, ml_file, buffer, caml_copy_int64(iOfst));
+        
+        if (Is_exception_result(result)) {
+            CAMLreturnT(int, SQLITE_IOERR_WRITE);
+        }
+        
+        int bytes_written = Int_val(result);
+        if (bytes_written == iAmt) {
+            CAMLreturnT(int, SQLITE_OK);
+        }
+        
+        CAMLreturnT(int, SQLITE_IOERR_WRITE);
+    }
+    
+    /* Fall back to default implementation */
+    return SQLITE_IOERR_WRITE;
+}
+
+static int vfs_truncate(sqlite3_file *pFile, sqlite3_int64 size) {
+    return SQLITE_OK;
+}
+
+static int vfs_sync(sqlite3_file *pFile, int flags) {
+    return SQLITE_OK;
+}
+
+static int vfs_file_size(sqlite3_file *pFile, sqlite3_int64 *pSize) {
+    *pSize = 0;
+    return SQLITE_OK;
+}
+
+/* VFS method table */
+static const sqlite3_io_methods ocaml_io_methods = {
+    3,                    /* iVersion */
+    vfs_close,           /* xClose */
+    vfs_read,            /* xRead */
+    vfs_write,           /* xWrite */
+    vfs_truncate,        /* xTruncate */
+    vfs_sync,            /* xSync */
+    vfs_file_size,       /* xFileSize */
+    NULL,                /* xLock */
+    NULL,                /* xUnlock */
+    NULL,                /* xCheckReservedLock */
+    NULL,                /* xFileControl */
+    NULL,                /* xSectorSize */
+    NULL,                /* xDeviceCharacteristics */
+    NULL,                /* xShmMap */
+    NULL,                /* xShmLock */
+    NULL,                /* xShmBarrier */
+    NULL,                /* xShmUnmap */
+    NULL,                /* xFetch */
+    NULL                 /* xUnfetch */
+};
+
+/* VFS interception functions exposed to Go */
+int distcore_vfs_intercept_read(void* file, char* buffer, int64_t offset, int amount) {
+    if (!file) return -1;
+    
+    sqlite3_file *sqlite_file = (sqlite3_file*)file;
+    return vfs_read(sqlite_file, buffer, amount, offset);
+}
+
+int distcore_vfs_intercept_write(void* file, char* buffer, int64_t offset, int amount) {
+    if (!file) return -1;
+    
+    sqlite3_file *sqlite_file = (sqlite3_file*)file;
+    return vfs_write(sqlite_file, buffer, amount, offset);
+}
+
+/* Get sync pages from VFS file */
+int distcore_get_sync_pages(void* file, int* page_nums, char** page_hashes, char** page_data, int max_pages) {
+    if (!file) return -1;
+    
+    CAMLparam0();
+    CAMLlocal2(result, ml_file);
+    
+    ocaml_vfs_file *vfs_file = (ocaml_vfs_file*)file;
+    ml_file = vfs_file->ocaml_file;
+    
+    static value *sync_pages_func = NULL;
+    if (!sync_pages_func) {
+        sync_pages_func = caml_named_value("get_sync_pages");
+        if (!sync_pages_func) {
+            CAMLreturnT(int, -1);
+        }
+    }
+    
+    result = caml_callback(*sync_pages_func, ml_file);
+    
+    if (Is_exception_result(result)) {
+        CAMLreturnT(int, -1);
+    }
+    
+    /* Process OCaml list of sync pages */
+    int count = 0;
+    value pages_list = result;
+    
+    while (pages_list != Val_emptylist && count < max_pages) {
+        value page_tuple = Field(pages_list, 0);
+        
+        /* Extract (page_num, hash, data) tuple */
+        page_nums[count] = Int_val(Field(page_tuple, 0));
+        
+        /* Copy hash string */
+        value hash_val = Field(page_tuple, 1);
+        int hash_len = caml_string_length(hash_val);
+        page_hashes[count] = malloc(hash_len + 1);
+        memcpy(page_hashes[count], String_val(hash_val), hash_len);
+        page_hashes[count][hash_len] = '\0';
+        
+        /* Copy page data */
+        value data_val = Field(page_tuple, 2);
+        struct caml_ba_array* ba = Caml_ba_array_val(data_val);
+        int data_len = ba->dim[0];
+        page_data[count] = malloc(data_len);
+        memcpy(page_data[count], ba->data, data_len);
+        
+        pages_list = Field(pages_list, 1);
+        count++;
+    }
+    
+    CAMLreturnT(int, count);
+}
+
+/* Compute diff pages between local and replica */
+int distcore_compute_diff_pages(int* local_pages, char** local_hashes, 
+                               int* replica_pages, char** replica_hashes, 
+                               int local_count, int replica_count,
+                               int* diff_pages, int max_diff) {
+    CAMLparam0();
+    CAMLlocal4(local_list, replica_list, result, temp);
+    
+    /* Build OCaml lists */
+    local_list = Val_emptylist;
+    for (int i = local_count - 1; i >= 0; i--) {
+        value page_tuple = caml_alloc(2, 0);
+        Store_field(page_tuple, 0, Val_int(local_pages[i]));
+        Store_field(page_tuple, 1, caml_copy_string(local_hashes[i]));
+        
+        temp = caml_alloc(2, 0);
+        Store_field(temp, 0, page_tuple);
+        Store_field(temp, 1, local_list);
+        local_list = temp;
+    }
+    
+    replica_list = Val_emptylist;
+    for (int i = replica_count - 1; i >= 0; i--) {
+        value page_tuple = caml_alloc(2, 0);
+        Store_field(page_tuple, 0, Val_int(replica_pages[i]));
+        Store_field(page_tuple, 1, caml_copy_string(replica_hashes[i]));
+        
+        temp = caml_alloc(2, 0);
+        Store_field(temp, 0, page_tuple);
+        Store_field(temp, 1, replica_list);
+        replica_list = temp;
+    }
+    
+    static value *diff_func = NULL;
+    if (!diff_func) {
+        diff_func = caml_named_value("compute_diff_pages");
+        if (!diff_func) {
+            CAMLreturnT(int, -1);
+        }
+    }
+    
+    result = caml_callback2(*diff_func, local_list, replica_list);
+    
+    if (Is_exception_result(result)) {
+        CAMLreturnT(int, -1);
+    }
+    
+    /* Extract page numbers from result list */
+    int count = 0;
+    value diff_list = result;
+    
+    while (diff_list != Val_emptylist && count < max_diff) {
+        diff_pages[count] = Int_val(Field(diff_list, 0));
+        diff_list = Field(diff_list, 1);
+        count++;
+    }
+    
+    CAMLreturnT(int, count);
+}
+
 /* Cleanup function */
 void distcore_cleanup() {
     /* Cleanup resources if needed */

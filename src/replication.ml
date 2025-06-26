@@ -142,203 +142,220 @@ let encode_write_batch batch =
 (** sqlite3_rsync protocol implementation *)
 module RsyncProtocol = struct
   type message =
-    | OriginBegin of { protocol: int; page_size: int }
-    | ReplicaHash of { page_num: int; hash: Binary_diff.page_hash }
+    (* Origin (source) messages *)
+    | OriginBegin of { protocol: int; page_size: int; page_count: int }
+    | OriginEnd
+    | OriginError of string
     | OriginPage of { 
         page_num: int; 
         data: (char, int8_unsigned_elt, c_layout) Array1.t 
       }
-    | OriginTxn of { generation: int64 }
+    | OriginTxn of { page_count: int }
+    | OriginMsg of string
+    (* Replica (destination) messages *)
+    | ReplicaBegin of { protocol: int }
+    | ReplicaEnd
+    | ReplicaError of string
+    | ReplicaHash of { page_num: int; hash: Binary_diff.page_hash }
+    | ReplicaReady
+    | ReplicaMsg of string
+  
+  (** Message type constants matching sqlite3_rsync *)
+  let origin_begin_type = 0x41
+  let origin_end_type = 0x42
+  let origin_error_type = 0x43
+  let origin_page_type = 0x44
+  let origin_txn_type = 0x45
+  let origin_msg_type = 0x46
+  
+  let replica_begin_type = 0x61
+  let replica_error_type = 0x62
+  let replica_end_type = 0x63
+  let replica_hash_type = 0x64
+  let replica_ready_type = 0x65
+  let replica_msg_type = 0x66
+  
+  (** Utility functions for binary encoding *)
+  let write_uint32 buf offset value =
+    Array1.set buf (offset + 0) (Char.chr ((value lsr 24) land 0xFF));
+    Array1.set buf (offset + 1) (Char.chr ((value lsr 16) land 0xFF));
+    Array1.set buf (offset + 2) (Char.chr ((value lsr 8) land 0xFF));
+    Array1.set buf (offset + 3) (Char.chr (value land 0xFF))
+  
+  let write_string buf offset str =
+    String.iteri (fun i c -> Array1.set buf (offset + i) c) str
   
   let encode message =
     match message with
-    | OriginBegin { protocol; page_size } ->
-        let buffer = Array1.create char c_layout 12 in
-        (* Message type: 1 *)
-        Array1.set buffer 0 '\001';
-        Array1.set buffer 1 '\000';
-        Array1.set buffer 2 '\000';
-        Array1.set buffer 3 '\000';
-        
-        (* Protocol version *)
-        Array1.set buffer 4 (Char.chr (protocol lsr 24));
-        Array1.set buffer 5 (Char.chr ((protocol lsr 16) land 0xFF));
-        Array1.set buffer 6 (Char.chr ((protocol lsr 8) land 0xFF));
-        Array1.set buffer 7 (Char.chr (protocol land 0xFF));
-        
-        (* Page size *)
-        Array1.set buffer 8 (Char.chr (page_size lsr 24));
-        Array1.set buffer 9 (Char.chr ((page_size lsr 16) land 0xFF));
-        Array1.set buffer 10 (Char.chr ((page_size lsr 8) land 0xFF));
-        Array1.set buffer 11 (Char.chr (page_size land 0xFF));
-        
+    | OriginBegin { protocol; page_size; page_count } ->
+        let buffer = Array1.create char c_layout 7 in
+        Array1.set buffer 0 (Char.chr origin_begin_type);
+        Array1.set buffer 1 (Char.chr protocol);
+        (* Page size as power of 2 (e.g., 4096 = 2^12) *)
+        let page_size_pow2 = 
+          let rec find_pow2 n acc = 
+            if n = 1 then acc else find_pow2 (n lsr 1) (acc + 1)
+          in find_pow2 page_size 0
+        in
+        Array1.set buffer 2 (Char.chr page_size_pow2);
+        write_uint32 buffer 3 page_count;
         buffer
         
-    | ReplicaHash { page_num; hash } ->
-        let hash_len = String.length hash in
-        let buffer = Array1.create char c_layout (12 + hash_len) in
+    | OriginEnd ->
+        let buffer = Array1.create char c_layout 1 in
+        Array1.set buffer 0 (Char.chr origin_end_type);
+        buffer
         
-        (* Message type: 2 *)
-        Array1.set buffer 0 '\002';
-        Array1.set buffer 1 '\000';
-        Array1.set buffer 2 '\000';
-        Array1.set buffer 3 '\000';
-        
-        (* Page number *)
-        Array1.set buffer 4 (Char.chr (page_num lsr 24));
-        Array1.set buffer 5 (Char.chr ((page_num lsr 16) land 0xFF));
-        Array1.set buffer 6 (Char.chr ((page_num lsr 8) land 0xFF));
-        Array1.set buffer 7 (Char.chr (page_num land 0xFF));
-        
-        (* Hash length *)
-        Array1.set buffer 8 (Char.chr (hash_len lsr 24));
-        Array1.set buffer 9 (Char.chr ((hash_len lsr 16) land 0xFF));
-        Array1.set buffer 10 (Char.chr ((hash_len lsr 8) land 0xFF));
-        Array1.set buffer 11 (Char.chr (hash_len land 0xFF));
-        
-        (* Hash data *)
-        String.iteri (fun i c ->
-          Array1.set buffer (12 + i) c
-        ) hash;
-        
+    | OriginError msg | OriginMsg msg ->
+        let msg_len = String.length msg in
+        let buffer = Array1.create char c_layout (5 + msg_len) in
+        let msg_type = if msg = OriginError msg then origin_error_type else origin_msg_type in
+        Array1.set buffer 0 (Char.chr msg_type);
+        write_uint32 buffer 1 msg_len;
+        write_string buffer 5 msg;
         buffer
         
     | OriginPage { page_num; data } ->
         let data_len = Array1.dim data in
-        let buffer = Array1.create char c_layout (12 + data_len) in
-        
-        (* Message type: 3 *)
-        Array1.set buffer 0 '\003';
-        Array1.set buffer 1 '\000';
-        Array1.set buffer 2 '\000';
-        Array1.set buffer 3 '\000';
-        
-        (* Page number *)
-        Array1.set buffer 4 (Char.chr (page_num lsr 24));
-        Array1.set buffer 5 (Char.chr ((page_num lsr 16) land 0xFF));
-        Array1.set buffer 6 (Char.chr ((page_num lsr 8) land 0xFF));
-        Array1.set buffer 7 (Char.chr (page_num land 0xFF));
-        
-        (* Data length *)
-        Array1.set buffer 8 (Char.chr (data_len lsr 24));
-        Array1.set buffer 9 (Char.chr ((data_len lsr 16) land 0xFF));
-        Array1.set buffer 10 (Char.chr ((data_len lsr 8) land 0xFF));
-        Array1.set buffer 11 (Char.chr (data_len land 0xFF));
-        
-        (* Page data (zero-copy) *)
+        let buffer = Array1.create char c_layout (5 + data_len) in
+        Array1.set buffer 0 (Char.chr origin_page_type);
+        write_uint32 buffer 1 page_num;
         for i = 0 to data_len - 1 do
-          Array1.set buffer (12 + i) (Array1.get data i);
+          Array1.set buffer (5 + i) (Array1.get data i);
         done;
-        
         buffer
         
-    | OriginTxn { generation } ->
-        let buffer = Array1.create char c_layout 12 in
-        
-        (* Message type: 4 *)
-        Array1.set buffer 0 '\004';
-        Array1.set buffer 1 '\000';
-        Array1.set buffer 2 '\000';
-        Array1.set buffer 3 '\000';
-        
-        (* Generation (8 bytes) *)
-        for i = 7 downto 0 do
-          Array1.set buffer (4 + i) (Char.chr (Int64.to_int (Int64.shift_right generation (i * 8)) land 0xFF));
-        done;
-        
+    | OriginTxn { page_count } ->
+        let buffer = Array1.create char c_layout 5 in
+        Array1.set buffer 0 (Char.chr origin_txn_type);
+        write_uint32 buffer 1 page_count;
         buffer
+        
+    | ReplicaBegin { protocol } ->
+        let buffer = Array1.create char c_layout 2 in
+        Array1.set buffer 0 (Char.chr replica_begin_type);
+        Array1.set buffer 1 (Char.chr protocol);
+        buffer
+        
+    | ReplicaEnd ->
+        let buffer = Array1.create char c_layout 1 in
+        Array1.set buffer 0 (Char.chr replica_end_type);
+        buffer
+        
+    | ReplicaError msg | ReplicaMsg msg ->
+        let msg_len = String.length msg in
+        let buffer = Array1.create char c_layout (5 + msg_len) in
+        let msg_type = if msg = ReplicaError msg then replica_error_type else replica_msg_type in
+        Array1.set buffer 0 (Char.chr msg_type);
+        write_uint32 buffer 1 msg_len;
+        write_string buffer 5 msg;
+        buffer
+        
+    | ReplicaHash { page_num; hash } ->
+        let buffer = Array1.create char c_layout 21 in (* 1 + 20 for hash *)
+        Array1.set buffer 0 (Char.chr replica_hash_type);
+        (* Hash is fixed 20 bytes *)
+        write_string buffer 1 hash;
+        buffer
+        
+    | ReplicaReady ->
+        let buffer = Array1.create char c_layout 1 in
+        Array1.set buffer 0 (Char.chr replica_ready_type);
+        buffer
+  
+  (** Utility functions for binary decoding *)
+  let read_uint32 buf offset =
+    (Char.code (Array1.get buf (offset + 0)) lsl 24) lor
+    (Char.code (Array1.get buf (offset + 1)) lsl 16) lor
+    (Char.code (Array1.get buf (offset + 2)) lsl 8) lor
+    (Char.code (Array1.get buf (offset + 3)))
+  
+  let read_string buf offset len =
+    String.init len (fun i -> Array1.get buf (offset + i))
   
   let decode buffer =
     let buffer_len = Array1.dim buffer in
-    if buffer_len < 4 then
+    if buffer_len < 1 then
       Error "Buffer too small for message type"
     else begin
-      let msg_type = 
-        (Char.code (Array1.get buffer 0)) lor
-        ((Char.code (Array1.get buffer 1)) lsl 8) lor
-        ((Char.code (Array1.get buffer 2)) lsl 16) lor
-        ((Char.code (Array1.get buffer 3)) lsl 24) in
+      let msg_type = Char.code (Array1.get buffer 0) in
       
       match msg_type with
-      | 1 -> (* OriginBegin *)
-          if buffer_len < 12 then
+      | t when t = origin_begin_type -> (* OriginBegin *)
+          if buffer_len < 7 then
             Error "Buffer too small for OriginBegin message"
           else begin
-            let protocol = 
-              (Char.code (Array1.get buffer 4)) lor
-              ((Char.code (Array1.get buffer 5)) lsl 8) lor
-              ((Char.code (Array1.get buffer 6)) lsl 16) lor
-              ((Char.code (Array1.get buffer 7)) lsl 24) in
-            
-            let page_size = 
-              (Char.code (Array1.get buffer 8)) lor
-              ((Char.code (Array1.get buffer 9)) lsl 8) lor
-              ((Char.code (Array1.get buffer 10)) lsl 16) lor
-              ((Char.code (Array1.get buffer 11)) lsl 24) in
-            
-            Ok (OriginBegin { protocol; page_size })
+            let protocol = Char.code (Array1.get buffer 1) in
+            let page_size_pow2 = Char.code (Array1.get buffer 2) in
+            let page_size = 1 lsl page_size_pow2 in
+            let page_count = read_uint32 buffer 3 in
+            Ok (OriginBegin { protocol; page_size; page_count })
           end
           
-      | 2 -> (* ReplicaHash *)
-          if buffer_len < 12 then
-            Error "Buffer too small for ReplicaHash header"
+      | t when t = origin_end_type -> Ok OriginEnd
+      
+      | t when t = origin_error_type || t = origin_msg_type ->
+          if buffer_len < 5 then
+            Error "Buffer too small for message with string"
           else begin
-            let page_num = 
-              (Char.code (Array1.get buffer 4)) lor
-              ((Char.code (Array1.get buffer 5)) lsl 8) lor
-              ((Char.code (Array1.get buffer 6)) lsl 16) lor
-              ((Char.code (Array1.get buffer 7)) lsl 24) in
-            
-            let hash_len = 
-              (Char.code (Array1.get buffer 8)) lor
-              ((Char.code (Array1.get buffer 9)) lsl 8) lor
-              ((Char.code (Array1.get buffer 10)) lsl 16) lor
-              ((Char.code (Array1.get buffer 11)) lsl 24) in
-            
-            if buffer_len < 12 + hash_len then
-              Error "Buffer too small for ReplicaHash data"
+            let msg_len = read_uint32 buffer 1 in
+            if buffer_len < 5 + msg_len then
+              Error "Buffer too small for message string data"
             else begin
-              let hash = String.init hash_len (fun i ->
-                Array1.get buffer (12 + i)
-              ) in
-              Ok (ReplicaHash { page_num; hash })
-            end
-          end
-          
-      | 3 -> (* OriginPage *)
-          if buffer_len < 12 then
+                           let msg = read_string buffer 5 msg_len in
+             Ok (if t = origin_error_type then OriginError msg else OriginMsg msg)
+           end
+         end
+         
+      | t when t = origin_page_type -> (* OriginPage *)
+          if buffer_len < 5 then
             Error "Buffer too small for OriginPage header"
           else begin
-            let page_num = 
-              (Char.code (Array1.get buffer 4)) lor
-              ((Char.code (Array1.get buffer 5)) lsl 8) lor
-              ((Char.code (Array1.get buffer 6)) lsl 16) lor
-              ((Char.code (Array1.get buffer 7)) lsl 24) in
-            
-            let data_len = 
-              (Char.code (Array1.get buffer 8)) lor
-              ((Char.code (Array1.get buffer 9)) lsl 8) lor
-              ((Char.code (Array1.get buffer 10)) lsl 16) lor
-              ((Char.code (Array1.get buffer 11)) lsl 24) in
-            
-            if buffer_len < 12 + data_len then
-              Error "Buffer too small for OriginPage data"
+            let page_num = read_uint32 buffer 1 in
+            let data_len = buffer_len - 5 in
+            let data = Array1.sub buffer 5 data_len in
+            Ok (OriginPage { page_num; data })
+          end
+          
+      | t when t = origin_txn_type -> (* OriginTxn *)
+          if buffer_len < 5 then
+            Error "Buffer too small for OriginTxn message"
+          else begin
+            let page_count = read_uint32 buffer 1 in
+            Ok (OriginTxn { page_count })
+          end
+          
+      | t when t = replica_begin_type -> (* ReplicaBegin *)
+          if buffer_len < 2 then
+            Error "Buffer too small for ReplicaBegin message"
+          else begin
+            let protocol = Char.code (Array1.get buffer 1) in
+            Ok (ReplicaBegin { protocol })
+          end
+          
+      | t when t = replica_end_type -> Ok ReplicaEnd
+      | t when t = replica_ready_type -> Ok ReplicaReady
+      
+      | t when t = replica_error_type || t = replica_msg_type ->
+          if buffer_len < 5 then
+            Error "Buffer too small for replica message with string"
+          else begin
+            let msg_len = read_uint32 buffer 1 in
+            if buffer_len < 5 + msg_len then
+              Error "Buffer too small for replica message string data"
             else begin
-              let data = Array1.sub buffer 12 data_len in
-              Ok (OriginPage { page_num; data })
+              let msg = read_string buffer 5 msg_len in
+              Ok (if t = replica_error_type then ReplicaError msg else ReplicaMsg msg)
             end
           end
           
-      | 4 -> (* OriginTxn *)
-          if buffer_len < 12 then
-            Error "Buffer too small for OriginTxn message"
+      | t when t = replica_hash_type -> (* ReplicaHash *)
+          if buffer_len < 21 then
+            Error "Buffer too small for ReplicaHash (need 20-byte hash)"
           else begin
-            let generation = ref 0L in
-            for i = 0 to 7 do
-              let byte = Int64.of_int (Char.code (Array1.get buffer (4 + i))) in
-              generation := Int64.logor !generation (Int64.shift_left byte (i * 8));
-            done;
-            Ok (OriginTxn { generation = !generation })
+            let hash = read_string buffer 1 20 in
+            (* Note: Original protocol doesn't include page_num in ReplicaHash *)
+            Ok (ReplicaHash { page_num = 0; hash })
           end
           
       | _ ->
