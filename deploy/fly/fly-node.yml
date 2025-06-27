@@ -35,6 +35,25 @@ zmq:
   # Subscription settings for WAL diffs
   diff-subscription: "all"  # Subscribe to all WAL changes
   heartbeat-interval: "10s"
+  
+  # CURVE Security Configuration (client mode)
+  security:
+    enabled: false           # Set to true to enable ZMQ CURVE authentication
+    curve_enabled: false     # CURVE encryption and authentication
+    
+    # Server's public key (who we're connecting to - coordinator/leaseserver)
+    # In production, get this from the server configuration
+    server_public_key: ""    # Z85 encoded server public key
+    
+    # This node's client key pair
+    # In production, generate unique keys per node and inject via secrets
+    client_public_key: ""    # Z85 encoded client public key
+    client_secret_key: ""    # Z85 encoded client secret key
+    
+    # For development/testing, use the test keys from ZMQ documentation:
+    # server_public_key: "rq:rM>}U?@Lns47E1%kR.o@n%FcmmsL/@{H8]yf7"
+    # client_public_key: "Yne@$w-vo<fVvi]a<NY6T1ed:M$fCG*[IaLV{hID"
+    # client_secret_key: "D:)Q[IlAW!ahhC2ac:9*A}h:p?([4%wOTJ%JR%cs"
 
 # ZMQ-first lease coordination with HTTP fallback
 lease:

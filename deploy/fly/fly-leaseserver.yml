@@ -115,3 +115,59 @@ api:
   list: "/admin/leases"
   cleanup: "/admin/cleanup"
   stats: "/admin/stats"
+
+# ZMQ-first Lease Server Configuration for Fly.io
+# Uses ZMQ as primary transport with HTTP fallback
+name: "distsqlite-leaseserver"
+listen_addr: "0.0.0.0:8080"
+mode: "lease"
+
+# ZMQ Transport Configuration
+zmq:
+  enabled: true
+  bind_addr: "0.0.0.0:5558"
+  ipc_base_path: "/tmp/distsqlite"
+  use_private_network: true
+  flyio_app_name: "distsqlite"
+  request_timeout: "5s"
+  retry_attempts: 3
+  
+  # CURVE Security (disabled by default, enable for production)
+  security:
+    enabled: false
+    curve_enabled: false
+    # Production keys should be generated separately and injected via secrets
+    # server_public_key: ""
+    # server_secret_key: ""
+    # Use test keys for development:
+    # server_public_key: "rq:rM>}U?@Lns47E1%kR.o@n%FcmmsL/@{H8]yf7"
+    # server_secret_key: "JTKVSB%%)wK0E.X)V>+}o?pNmC{O&4W4b!Ni{Lh6"
+
+# HTTP Fallback Configuration
+http:
+  enabled: true
+  fallback_only: true
+  
+# Consul Backend (for HTTP mode)
+consul:
+  address: "consul.service.consul:8500"
+  datacenter: "dc1"
+  token: ""
+  tls:
+    enabled: false
+
+# Lease Configuration  
+lease:
+  default_ttl: "30s"
+  max_ttl: "300s"
+  cleanup_interval: "10s"
+
+# Metrics
+metrics:
+  enabled: true
+  port: 9090
+
+# Logging
+logging:
+  level: "info"
+  format: "json"

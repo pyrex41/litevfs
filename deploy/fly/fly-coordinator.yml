@@ -25,12 +25,22 @@ zmq:
   retry-attempts: 3
   high-water-mark: 10000
   
-  # Security configuration (simple)
+  # CURVE Security Configuration
   security:
-    # For production, consider enabling authentication
-    enabled: false  # Set to true to enable basic ZMQ security
-    # curve-enabled: false  # CURVE encryption (requires certificates)
-    # allowed-clients: []   # List of allowed client IDs
+    enabled: false      # Set to true to enable ZMQ CURVE authentication
+    curve_enabled: false  # CURVE encryption and authentication
+    
+    # Server keys (coordinator acts as server for most sockets)
+    # In production, generate these keys separately and inject via secrets
+    server_public_key: ""   # Z85 encoded server public key
+    server_secret_key: ""   # Z85 encoded server secret key
+    
+    # For development/testing, use the test keys from ZMQ documentation:
+    # server_public_key: "rq:rM>}U?@Lns47E1%kR.o@n%FcmmsL/@{H8]yf7"
+    # server_secret_key: "JTKVSB%%)wK0E.X)V>+}o?pNmC{O&4W4b!Ni{Lh6"
+    
+    # Optional: restrict to specific client public keys
+    allowed_clients: []
 
 # ZMQ-first lease coordination with HTTP fallback
 lease:
