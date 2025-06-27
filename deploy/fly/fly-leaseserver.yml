@@ -1,0 +1,107 @@
+# DistSQLite Lease Server Configuration for Fly.io
+# Simple HTTP-based lease coordination
+
+# Server binding
+bind-addr: "0.0.0.0:8080"
+hostname: "leaseserver"
+
+# Fly.io optimized paths
+data-dir: "/app/data/leases"
+log-dir: "/app/logs"
+
+# Lease configuration
+lease:
+  # Faster failover on Fly.io's reliable network
+  default-ttl: "10s"
+  max-ttl: "300s"
+  min-ttl: "1s"
+  
+  # Cleanup settings
+  cleanup-interval: "30s"
+  expired-lease-retention: "60s"
+  
+  # Multi-region settings
+  enable-region-awareness: true
+  prefer-local-region: true
+
+# HTTP API settings
+http:
+  read-timeout: "10s"
+  write-timeout: "10s"
+  idle-timeout: "60s"
+  max-header-bytes: 1048576
+  
+  # Enable CORS for cross-region access
+  enable-cors: true
+  cors-origins: ["*.internal", "*.fly.dev"]
+
+# Performance and reliability
+storage:
+  # Use file-based storage for persistence across restarts
+  type: "file"
+  file-path: "/app/data/leases/leases.json"
+  sync-interval: "5s"
+  backup-interval: "60s"
+  max-backups: 10
+
+# Multi-region coordination
+regions:
+  primary: "${FLY_PRIMARY_REGION:-ord}"
+  current: "${FLY_REGION}"
+  
+  # Cross-region lease server endpoints for failover
+  peers:
+    - "leaseserver-ord.internal:8080"
+    - "leaseserver-iad.internal:8080"
+    - "leaseserver-lax.internal:8080"
+    - "leaseserver-fra.internal:8080"
+
+# Monitoring and health checks
+health:
+  endpoint: "/health"
+  detailed-endpoint: "/health/detail"
+  
+  # Custom health checks
+  checks:
+    - name: "lease-storage"
+      endpoint: "/health/storage"
+    - name: "region-connectivity"
+      endpoint: "/health/regions"
+
+# Logging
+logging:
+  level: "${LOG_LEVEL:-info}"
+  format: "json"
+  output: "/app/logs/leaseserver.log"
+  
+  # Fly.io specific logging
+  structured: true
+  include-region: true
+  include-machine-id: true
+  access-log: true
+
+# Metrics for monitoring
+metrics:
+  enabled: true
+  listen-addr: "0.0.0.0:9092"
+  path: "/metrics"
+  
+  # Custom metrics
+  custom-metrics:
+    - "active_leases"
+    - "lease_acquisition_rate"
+    - "lease_expiration_rate"
+    - "cross_region_requests"
+
+# API endpoints
+api:
+  # Lease management
+  acquire: "/lease/acquire"
+  release: "/lease/release"
+  renew: "/lease/renew"
+  status: "/lease/status"
+  
+  # Administrative
+  list: "/admin/leases"
+  cleanup: "/admin/cleanup"
+  stats: "/admin/stats"

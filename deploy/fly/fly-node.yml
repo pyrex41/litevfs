@@ -30,8 +30,8 @@ zmq:
   diff-subscription: "all"  # Subscribe to all WAL changes
   heartbeat-interval: "10s"
 
-# Consul coordination  
-consul-url: "${CONSUL_HTTP_ADDR:-http://consul.internal:8500}"
+# Simple HTTP lease server coordination
+lease-server-url: "${LEASE_SERVER_URL:-http://leaseserver.internal:8080}"
 
 # Regional peer discovery
 region-peers:

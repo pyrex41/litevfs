@@ -14,14 +14,6 @@ case "$DISTSQLITE_ROLE" in
     "coordinator")
         echo "Starting coordinator mode..."
         
-        # Start Consul in background if not using external consul
-        if [ -z "$CONSUL_HTTP_ADDR" ]; then
-            echo "Starting local Consul..."
-            consul agent -config-dir=/app/consul -data-dir=/app/data/consul &
-            CONSUL_PID=$!
-            sleep 5
-        fi
-        
         # Start coordinator
         exec /app/bin/distsqlite-coordinator \
             --config /app/config/fly-coordinator.yml \

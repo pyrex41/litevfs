@@ -8,7 +8,7 @@ primary_region = "ord"
   DISTSQLITE_ROLE = "coordinator"
   DISTSQLITE_ZMQ_BIND = "0.0.0.0:5555"
   DISTSQLITE_PRIVATE_NETWORK = "true"
-  CONSUL_HTTP_ADDR = "http://consul.internal:8500"
+  LEASE_SERVER_URL = "http://leaseserver.internal:8080"
 
 [[services]]
   http_checks = []
@@ -76,7 +76,7 @@ primary_region = "ord"
 [processes]
   app = "distsqlite-coordinator"
   node = "distsqlite --config /app/config/fly-node.yml"
-  consul = "consul agent -config-dir=/app/consul"
+  leaseserver = "distsqlite-leaseserver --config /app/config/fly-leaseserver.yml"
 
 [checks]
   [checks.zmq_health]

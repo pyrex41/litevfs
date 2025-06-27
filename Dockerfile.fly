@@ -50,7 +50,9 @@ FROM ubuntu:22.04
 RUN apt-get update && apt-get install -y \
     libzmq5 \
     libsqlite3-0 \
-    consul \
+    netcat-openbsd \
+    curl \
+    jq \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -64,7 +66,6 @@ COPY --from=ocaml-builder /build/_build/default/src/ ./lib/
 
 # Copy configuration templates
 COPY deploy/fly/ ./config/
-COPY deploy/consul/ ./consul/
 
 # Create necessary directories
 RUN mkdir -p /app/data /app/logs && \
@@ -75,7 +76,7 @@ COPY deploy/fly/entrypoint.sh ./
 RUN chmod +x ./entrypoint.sh
 
 # Expose ports
-EXPOSE 5555 5556 5557 8080 8500
+EXPOSE 5555 5556 5557 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
