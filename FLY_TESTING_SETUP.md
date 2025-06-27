@@ -71,6 +71,19 @@ cd litevfs
 make build
 ```
 
+### Validate Before Deployment
+
+```bash
+# Run comprehensive local validation
+./test/validation_suite.sh
+
+# Quick dependency check
+./test/validation_suite.sh quick
+
+# Performance tests only
+./test/validation_suite.sh performance
+```
+
 ### Deploy Everything
 
 ```bash
@@ -237,7 +250,31 @@ flyctl ssh console --app distsqlite-test-tests
 
 ## 🧪 Running Custom Tests
 
-### Manual Test Execution
+### Local Test Execution
+
+```bash
+# Run all validation tests locally
+./test/validation_suite.sh
+
+# Run specific test categories
+go run test/integration/zmq_transport_test.go
+go run test/integration/fallback_test.go
+go run test/benchmarks/distributed_load_test.go
+
+# Run performance benchmarks
+go test -bench=. ./test/benchmarks/
+```
+
+### Available Test Suites
+
+| Test Suite | Description | Command |
+|------------|-------------|---------|
+| **ZMQ Transport** | Basic ZMQ connectivity, REQ/REP, PUB/SUB | `go run test/integration/zmq_transport_test.go` |
+| **Fallback Mechanism** | ZMQ-first with HTTP fallback | `go run test/integration/fallback_test.go` |
+| **Load Testing** | Performance under concurrent load | `go run test/benchmarks/distributed_load_test.go` |
+| **Validation Suite** | Comprehensive pre-deployment checks | `./test/validation_suite.sh` |
+
+### Manual Test Execution on Fly.io
 
 ```bash
 # SSH into test runner
@@ -253,9 +290,10 @@ go test -bench=. ./test/benchmarks/
 
 ### Adding New Tests
 
-1. Add test to `test/run_distributed_tests.sh`
-2. Update configurations if needed
-3. Redeploy: `./deploy/fly-deploy.sh deploy`
+1. Add test to appropriate directory (`test/integration/`, `test/benchmarks/`)
+2. Update `test/run_distributed_tests.sh` for Fly.io execution
+3. Add to `test/validation_suite.sh` for local validation
+4. Redeploy: `./deploy/fly-deploy.sh deploy`
 
 ## 🛠️ Troubleshooting
 
