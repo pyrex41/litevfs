@@ -1,0 +1,114 @@
+# DistSQLite Node Configuration for Fly.io
+hostname: "${FLY_REGION}-${FLY_MACHINE_ID}"
+advertise-url: "http://${FLY_REGION}-node.internal:8080"
+
+# Fly.io optimized paths  
+data-dir: "/app/data"
+log-dir: "/app/logs"
+
+# HTTP API server
+http-addr: "0.0.0.0:8080"
+
+# ZMQ Transport Configuration
+zmq:
+  # Connect to coordinator via private network
+  coordinator-endpoints:
+    - "tcp://coordinator.internal:5555"
+    - "tcp://coordinator-${FLY_PRIMARY_REGION}.internal:5555"
+  
+  # Node-specific ZMQ settings
+  node-id: "${FLY_REGION}-${FLY_MACHINE_ID}"
+  use-private-network: true
+  flyio-app-name: "${FLY_APP_NAME}"
+  
+  # Client configuration
+  request-timeout: "5s"
+  retry-attempts: 5
+  reconnect-interval: "2s"
+  
+  # Subscription settings for WAL diffs
+  diff-subscription: "all"  # Subscribe to all WAL changes
+  heartbeat-interval: "10s"
+
+# Consul coordination  
+consul-url: "${CONSUL_HTTP_ADDR:-http://consul.internal:8500}"
+
+# Regional peer discovery
+region-peers:
+  ord: ["node-ord-1.internal", "node-ord-2.internal"]
+  iad: ["node-iad-1.internal", "node-iad-2.internal"]  
+  lax: ["node-lax-1.internal", "node-lax-2.internal"]
+  fra: ["node-fra-1.internal", "node-fra-2.internal"]
+
+# Replication settings for regional nodes
+replication:
+  # Regional optimization
+  prefer-local-peers: true
+  cross-region-delay: "5s"
+  
+  # Smaller thresholds for faster sync
+  bulk-threshold: 262144  # 256KB
+  max-delay: "3s"
+  
+  # ZMQ rsync configuration
+  rsync:
+    transport: "zmq"
+    compression: "zstd"
+    bandwidth-limit: "500M"
+    timeout: "15m"
+    max-retries: 3
+    
+    # Regional failover
+    fallback-endpoints:
+      - "coordinator.internal:5555"
+      - "coordinator-${FLY_PRIMARY_REGION}.internal:5555"
+
+# Lease settings for nodes
+lease:
+  # Nodes don't hold primary leases, but participate in coordination
+  participate: true
+  heartbeat-interval: "3s"
+  
+# Database configuration
+database:
+  # WAL mode for better concurrency
+  journal-mode: "WAL"
+  synchronous: "NORMAL"
+  
+  # Fly.io SSD optimization
+  cache-size: 10000
+  temp-store: "MEMORY"
+  
+  # Connection pooling
+  max-connections: 100
+  idle-timeout: "5m"
+
+# Logging configuration
+logging:
+  level: "${LOG_LEVEL:-info}"
+  format: "json"
+  output: "/app/logs/node.log"
+  
+  # Region-specific logging
+  structured: true
+  include-region: true
+  include-machine-id: true
+  include-coordinator: true
+
+# Health and monitoring
+health:
+  endpoint: "/health"
+  detailed-endpoint: "/health/detail"
+  include-peers: true
+  
+metrics:
+  enabled: true  
+  listen-addr: "0.0.0.0:9091"
+  path: "/metrics"
+  
+  # Custom metrics for distributed testing
+  custom-metrics:
+    - "replication_lag"
+    - "zmq_message_rate" 
+    - "cross_region_latency"
+    - "lease_acquisition_time"

@@ -1,0 +1,86 @@
+# DistSQLite Coordinator Configuration for Fly.io
+hostname: "coordinator"
+advertise-url: "http://coordinator.internal:8080"
+
+# Fly.io optimized paths
+data-dir: "/app/data"
+log-dir: "/app/logs"
+
+# HTTP API server
+http-addr: "0.0.0.0:8080"
+
+# ZMQ Transport Configuration (more efficient than HTTP)
+zmq:
+  bind-addr: "0.0.0.0:5555"
+  use-private-network: true
+  flyio-app-name: "${FLY_APP_NAME}"
+  
+  # ZMQ ports for different functions
+  lease-port: 5555       # REP socket for lease requests
+  diff-port: 5556        # PUB socket for WAL diff broadcasting  
+  router-port: 5557      # ROUTER socket for cluster management
+  
+  # Performance tuning
+  request-timeout: "3s"
+  retry-attempts: 3
+  high-water-mark: 10000
+
+# Consul coordination
+consul-url: "${CONSUL_HTTP_ADDR:-http://consul.internal:8500}"
+lease-key: "distsqlite/primary"
+
+# Multi-region peer discovery
+peers:
+  - "coordinator-iad.internal:5555"   # US East
+  - "coordinator-lax.internal:5555"   # US West  
+  - "coordinator-fra.internal:5555"   # Europe
+  - "coordinator-nrt.internal:5555"   # Asia
+
+# Replication settings optimized for Fly.io
+replication:
+  # Lower threshold for Fly.io's fast network
+  bulk-threshold: 524288  # 512KB (smaller than default)
+  
+  # Faster replication due to Fly's network
+  max-delay: "2s"
+  
+  # ZMQ-optimized rsync settings
+  rsync:
+    transport: "zmq"      # Use ZMQ instead of HTTP
+    compression: "zstd"
+    bandwidth-limit: "1G" # Fly.io has excellent bandwidth
+    timeout: "10m"
+    max-retries: 5
+    
+    # Fly.io specific optimizations
+    use-private-network: true
+    connection-pooling: true
+    keepalive: "30s"
+
+# Lease management with faster failover
+lease:
+  ttl: "5s"              # Shorter TTL for faster failover
+  lock-delay: "500ms"    # Faster lease acquisition
+  
+# Fly.io optimized logging
+logging:
+  level: "${LOG_LEVEL:-info}"
+  format: "json"
+  output: "/app/logs/coordinator.log"
+  
+  # Fly.io log shipping
+  structured: true
+  include-region: true
+  include-machine-id: true
+
+# Health checks
+health:
+  zmq-endpoint: "/health/zmq"
+  lease-endpoint: "/health/lease"  
+  metrics-endpoint: "/metrics"
+
+# Performance monitoring
+metrics:
+  enabled: true
+  listen-addr: "0.0.0.0:9090"
+  path: "/metrics"

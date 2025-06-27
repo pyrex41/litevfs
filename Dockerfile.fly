@@ -1,0 +1,85 @@
+# Multi-stage build for DistSQLite on Fly.io
+FROM golang:1.21-bullseye AS go-builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libzmq3-dev \
+    libsqlite3-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy Go modules first for better caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build Go binaries
+RUN make build-go
+
+# OCaml builder stage
+FROM ocaml/opam:ubuntu-22.04 AS ocaml-builder
+
+# Switch to root to install system packages
+USER root
+RUN apt-get update && apt-get install -y \
+    libzmq3-dev \
+    libsqlite3-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Switch back to opam user
+USER opam
+WORKDIR /build
+
+# Copy OCaml source
+COPY --chown=opam:opam . .
+
+# Install OCaml dependencies and build
+RUN opam install -y dune zmq sqlite3 msgpack
+RUN eval $(opam env) && make build-ocaml
+
+# Final runtime stage
+FROM ubuntu:22.04
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    libzmq5 \
+    libsqlite3-0 \
+    consul \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app directory and user
+RUN groupadd -r distsqlite && useradd -r -g distsqlite distsqlite
+WORKDIR /app
+
+# Copy binaries from builders
+COPY --from=go-builder /build/build/ ./bin/
+COPY --from=ocaml-builder /build/_build/default/src/ ./lib/
+
+# Copy configuration templates
+COPY deploy/fly/ ./config/
+COPY deploy/consul/ ./consul/
+
+# Create necessary directories
+RUN mkdir -p /app/data /app/logs && \
+    chown -R distsqlite:distsqlite /app
+
+# Copy startup script
+COPY deploy/fly/entrypoint.sh ./
+RUN chmod +x ./entrypoint.sh
+
+# Expose ports
+EXPOSE 5555 5556 5557 8080 8500
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+USER distsqlite
+ENTRYPOINT ["./entrypoint.sh"]
