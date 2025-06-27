@@ -88,6 +88,15 @@ primary_region = "$PRIMARY_REGION"
   DISTSQLITE_ROLE = "leaseserver"
   FLY_PRIMARY_REGION = "$PRIMARY_REGION"
 
+# ZMQ lease coordination port
+[[services]]
+  internal_port = 5558
+  protocol = "tcp"
+  
+  [[services.ports]]
+    port = 5558
+
+# HTTP API port
 [[services]]
   internal_port = 8080
   protocol = "tcp"
@@ -166,6 +175,13 @@ primary_region = "$region"
   
   [[services.ports]]
     port = 5557
+
+[[services]]
+  internal_port = 5558
+  protocol = "tcp"
+  
+  [[services.ports]]
+    port = 5558
 
 [[services]]
   internal_port = 8080

@@ -30,8 +30,21 @@ zmq:
   diff-subscription: "all"  # Subscribe to all WAL changes
   heartbeat-interval: "10s"
 
-# Simple HTTP lease server coordination
-lease-server-url: "${LEASE_SERVER_URL:-http://leaseserver.internal:8080}"
+# ZMQ-first lease coordination with HTTP fallback
+lease:
+  # Primary ZMQ lease coordination
+  zmq-endpoints:
+    - "tcp://leaseserver.internal:5558"
+    - "tcp://coordinator.internal:5558"
+  
+  # HTTP fallback endpoints  
+  http-endpoints:
+    - "${LEASE_SERVER_URL:-http://leaseserver.internal:8080}"
+  
+  # Transport settings
+  transport-preference: "zmq"
+  connection-timeout: "2s"
+  retry-zmq-attempts: 3
 
 # Regional peer discovery
 region-peers:

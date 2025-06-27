@@ -76,7 +76,7 @@ COPY deploy/fly/entrypoint.sh ./
 RUN chmod +x ./entrypoint.sh
 
 # Expose ports
-EXPOSE 5555 5556 5557 8080
+EXPOSE 5555 5556 5557 5558 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

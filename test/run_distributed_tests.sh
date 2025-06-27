@@ -55,6 +55,19 @@ check_zmq_connectivity() {
     log_test "✅ ZMQ connectivity to $endpoint OK"
 }
 
+check_zmq_lease_connectivity() {
+    local endpoint=$1
+    log_test "Testing ZMQ lease connectivity to $endpoint"
+    
+    # Test ZMQ lease endpoint
+    timeout 10s /app/bin/zmq-test --endpoint "$endpoint" --mode lease-test || {
+        log_test "ERROR: ZMQ lease connectivity test failed for $endpoint"
+        return 1
+    }
+    
+    log_test "✅ ZMQ lease connectivity to $endpoint OK"
+}
+
 run_performance_test() {
     local test_name=$1
     local rows=$2
@@ -203,12 +216,52 @@ run_zmq_performance_test() {
     
     local speedup=$(( http_duration / zmq_duration ))
     
-    log_test "📊 Performance Results:"
+    log_test "📊 Transport Performance Results:"
     log_test "  ZMQ: ${zmq_duration}ms (1000 requests)"
     log_test "  HTTP: ${http_duration}ms (1000 requests)"
     log_test "  Speedup: ${speedup}x faster with ZMQ"
     
-    echo "zmq,$zmq_duration,http,$http_duration,speedup,${speedup}x" >> "$TEST_RESULTS_DIR/transport-comparison.csv"
+    echo "transport,zmq,$zmq_duration,http,$http_duration,speedup,${speedup}x" >> "$TEST_RESULTS_DIR/transport-comparison.csv"
+}
+
+run_zmq_lease_performance_test() {
+    log_test "🔐 Running ZMQ vs HTTP lease performance comparison"
+    
+    local lease_zmq_endpoint="leaseserver.internal:5558"
+    local lease_http_endpoint="http://leaseserver.internal:8080"
+    
+    # Test ZMQ lease performance
+    log_test "Testing ZMQ lease performance..."
+    local zmq_lease_start=$(date +%s%N)
+    
+    for i in {1..100}; do
+        /app/bin/zmq-test --endpoint "$lease_zmq_endpoint" --mode lease-acquire --lease-id "test-$i" >/dev/null 2>&1
+        /app/bin/zmq-test --endpoint "$lease_zmq_endpoint" --mode lease-release --lease-id "test-$i" >/dev/null 2>&1
+    done
+    
+    local zmq_lease_end=$(date +%s%N)
+    local zmq_lease_duration=$(( (zmq_lease_end - zmq_lease_start) / 1000000 ))
+    
+    # Test HTTP lease performance
+    log_test "Testing HTTP lease performance..."
+    local http_lease_start=$(date +%s%N)
+    
+    for i in {1..100}; do
+        curl -s -X POST "$lease_http_endpoint/lease/acquire" -d "{\"id\":\"test-$i\",\"ttl\":\"10s\"}" >/dev/null 2>&1
+        curl -s -X POST "$lease_http_endpoint/lease/release" -d "{\"id\":\"test-$i\"}" >/dev/null 2>&1
+    done
+    
+    local http_lease_end=$(date +%s%N)
+    local http_lease_duration=$(( (http_lease_end - http_lease_start) / 1000000 ))
+    
+    local lease_speedup=$(( http_lease_duration / zmq_lease_duration ))
+    
+    log_test "📊 Lease Performance Results:"
+    log_test "  ZMQ Leases: ${zmq_lease_duration}ms (100 acquire/release cycles)"
+    log_test "  HTTP Leases: ${http_lease_duration}ms (100 acquire/release cycles)"
+    log_test "  Speedup: ${lease_speedup}x faster with ZMQ"
+    
+    echo "lease,zmq,$zmq_lease_duration,http,$http_lease_duration,speedup,${lease_speedup}x" >> "$TEST_RESULTS_DIR/transport-comparison.csv"
 }
 
 generate_test_report() {
@@ -261,9 +314,12 @@ main() {
     # Wait for core services
     wait_for_service "coordinator.internal" 5555 60
     wait_for_service "coordinator.internal" 8080 30
+    wait_for_service "leaseserver.internal" 5558 30
+    wait_for_service "leaseserver.internal" 8080 30
     
     # Test ZMQ connectivity
     check_zmq_connectivity "$COORDINATOR_ENDPOINT"
+    check_zmq_lease_connectivity "leaseserver.internal:5558"
     
     # Initialize test database
     log_test "Initializing test database"
@@ -284,6 +340,9 @@ main() {
     
     # Transport performance comparison
     run_zmq_performance_test
+    
+    # Lease performance comparison
+    run_zmq_lease_performance_test
     
     # Distributed system tests
     run_split_brain_test

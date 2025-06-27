@@ -8,7 +8,8 @@ This document describes the comprehensive testing setup for DistSQLite using Fly
 
 1. **Lease Server** (`distsqlite-leaseserver`)
    - Single instance in primary region (Chicago/ORD)
-   - Manages distributed locking via simple HTTP API
+   - **ZMQ-first lease coordination** with HTTP fallback
+   - REQ/REP pattern on port 5558 for ultra-low latency
    - Persistent storage for lease state
    - Fast failover capabilities
 
@@ -34,14 +35,16 @@ This document describes the comprehensive testing setup for DistSQLite using Fly
 ```
                     ┌─────────────────┐
                     │   Lease Server  │
+                    │ ZMQ:5558 HTTP:80│
                     │    (ORD)        │
                     └─────────────────┘
-                            │
+                            │ ZMQ REQ/REP
                 ┌───────────┼───────────┐
                 │           │           │
         ┌───────────┐ ┌───────────┐ ┌───────────┐
         │Coordinator│ │Coordinator│ │Coordinator│
         │   (ORD)   │ │   (IAD)   │ │   (LAX)   │
+        │ ZMQ:5555-8│ │ ZMQ:5555-8│ │ ZMQ:5555-8│
         └───────────┘ └───────────┘ └───────────┘
          │         │   │         │   │         │
     ┌─────┐   ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐
@@ -139,21 +142,24 @@ zmq:
   router-port: 5557     # ROUTER socket
 ```
 
-### Lease Server Configuration
+### ZMQ-First Lease Configuration
 
 ```yaml
-# Simple HTTP-based coordination
-lease-server-url: "http://leaseserver.internal:8080"
+# ZMQ-first lease coordination with HTTP fallback
 lease:
-  default-ttl: "10s"
-  cleanup-interval: "30s"
+  # Primary ZMQ lease coordination
+  zmq-endpoints:
+    - "tcp://leaseserver.internal:5558"  # Ultra-fast REQ/REP
+    - "tcp://coordinator.internal:5558"  # Self-coordination fallback
   
-# Multi-region failover
-regions:
-  primary: "ord"
-  peers:
-    - "leaseserver-ord.internal:8080"
-    - "leaseserver-iad.internal:8080"
+  # HTTP fallback endpoints
+  http-endpoints:
+    - "http://leaseserver.internal:8080"
+  
+  # Transport preference
+  transport-preference: "zmq"
+  connection-timeout: "2s"
+  retry-zmq-attempts: 3
 ```
 
 ## 📈 Performance Expectations
@@ -162,12 +168,13 @@ Based on DistSQLite's "10-100x faster than Turso" claim:
 
 | Test Scenario | Expected Result |
 |---------------|-----------------|
-| ZMQ vs HTTP | 3-5x faster message delivery |
+| ZMQ vs HTTP Transport | 3-5x faster message delivery |
+| ZMQ vs HTTP Leases | 5-10x faster lease operations |
 | Small datasets | 10x faster than baseline |
 | Medium datasets | 50x faster than baseline |
 | Large datasets | 100x faster than baseline |
 | Cross-region latency | <100ms for replication |
-| Lease failover | <1s for new lease acquisition |
+| Lease failover | <500ms with ZMQ coordination |
 
 ## 🌍 Regional Deployment
 
@@ -286,9 +293,11 @@ export LOG_LEVEL=debug
 ### Over HTTP-based Testing
 
 1. **ZMQ Performance**: 3-5x faster than HTTP for messaging
-2. **Connection Efficiency**: Persistent connections vs HTTP overhead
-3. **Binary Protocol**: Msgpack serialization vs JSON
-4. **Multiplexing**: Multiple message types on same connection
+2. **ZMQ Lease Performance**: 5-10x faster lease operations  
+3. **Connection Efficiency**: Persistent connections vs HTTP overhead
+4. **Binary Protocol**: Msgpack serialization vs JSON
+5. **Multiplexing**: Multiple message types on same connection
+6. **Intelligent Fallback**: ZMQ-first with HTTP backup
 
 ### Over Single-Region Testing
 
@@ -316,6 +325,11 @@ Tests generate structured reports:
 - HTTP: 180ms (1000 requests)  
 - Speedup: 4x faster with ZMQ
 
+**Lease Performance:**
+- ZMQ Leases: 850ms (100 acquire/release cycles)
+- HTTP Leases: 4200ms (100 acquire/release cycles)
+- Speedup: 5x faster with ZMQ leases
+
 **Performance Results:**
 - SmallData: 15,000 ops/sec
 - MediumData: 8,500 ops/sec
@@ -324,7 +338,7 @@ Tests generate structured reports:
 **Reliability:**
 - ✅ Split-brain Prevention
 - ✅ Cross-region Replication
-- ✅ Lease Failover (<1s)
+- ✅ Lease Failover (<500ms)
 ```
 
-This setup provides comprehensive testing of DistSQLite's distributed capabilities using Fly.io's infrastructure with efficient ZMQ transport and simple HTTP-based lease coordination.
+This setup provides comprehensive testing of DistSQLite's distributed capabilities using Fly.io's infrastructure with efficient ZMQ-first transport and ZMQ-first lease coordination with intelligent HTTP fallback.

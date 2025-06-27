@@ -73,6 +73,16 @@ primary_region = "ord"
   [[services.ports]]
     port = 5557
 
+# ZMQ Lease port
+[[services]]
+  http_checks = []
+  internal_port = 5558
+  processes = ["app"]
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 5558
+
 [processes]
   app = "distsqlite-coordinator"
   node = "distsqlite --config /app/config/fly-node.yml"

@@ -1,9 +1,19 @@
 # DistSQLite Lease Server Configuration for Fly.io
 # Simple HTTP-based lease coordination
 
-# Server binding
-bind-addr: "0.0.0.0:8080"
+# Dual transport lease server (ZMQ + HTTP)
 hostname: "leaseserver"
+
+# ZMQ transport (primary)
+zmq:
+  bind-addr: "0.0.0.0:5558"
+  socket-type: "REP"  # REQ/REP pattern for lease requests
+  high-water-mark: 1000
+  request-timeout: "5s"
+  
+# HTTP transport (fallback)
+http:
+  bind-addr: "0.0.0.0:8080"
 
 # Fly.io optimized paths
 data-dir: "/app/data/leases"
@@ -24,8 +34,8 @@ lease:
   enable-region-awareness: true
   prefer-local-region: true
 
-# HTTP API settings
-http:
+# HTTP API settings (continued)
+http-settings:
   read-timeout: "10s"
   write-timeout: "10s"
   idle-timeout: "60s"

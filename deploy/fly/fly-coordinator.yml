@@ -25,9 +25,22 @@ zmq:
   retry-attempts: 3
   high-water-mark: 10000
 
-# Simple HTTP lease server coordination
-lease-server-url: "${LEASE_SERVER_URL:-http://leaseserver.internal:8080}"
-lease-key: "distsqlite/primary"
+# ZMQ-first lease coordination with HTTP fallback
+lease:
+  # Primary ZMQ lease coordination
+  zmq-endpoints:
+    - "tcp://leaseserver.internal:5558"  # ZMQ lease port
+    - "tcp://coordinator.internal:5558"  # Self-coordination fallback
+  
+  # HTTP fallback endpoints
+  http-endpoints:
+    - "${LEASE_SERVER_URL:-http://leaseserver.internal:8080}"
+  
+  # Lease settings
+  lease-key: "distsqlite/primary"
+  transport-preference: "zmq"  # Try ZMQ first, fallback to HTTP
+  connection-timeout: "2s"
+  retry-zmq-attempts: 3
 
 # Multi-region peer discovery
 peers:
