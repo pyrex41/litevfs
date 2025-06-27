@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"sync"
-	"unsafe"
 )
 
 /*
