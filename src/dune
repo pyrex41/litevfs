@@ -10,6 +10,6 @@
  (action
   (run gcc -shared -fPIC -O3 -DCAML_NAME_SPACE -o libdistcore.so 
        distcore_stubs.c 
-       -I %{lib:ocaml:} 
-       -I %{ocaml:standard_library}
+       distcore.cma
+       -I %{ocaml_where}
        -lasmrun_shared -lm -lunix -ldl)))

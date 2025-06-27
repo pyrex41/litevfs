@@ -13,19 +13,3 @@
   bigarray-compat
   core_bench
   alcotest))
-
-(executables
- (public_names distcore_bench))
-
-(library
- (public_name distsqlite-core)
- (name distcore)
- (modules distcore lock_free_queue binary_diff replication lease_state_machine)
- (libraries bigarray-compat))
-
-(rule
- (targets libdistcore.so)
- (deps distcore_stubs.c (glob_files *.cmo) (glob_files *.cmx))
- (action
-  (run gcc -shared -fPIC -O3 -o libdistcore.so distcore_stubs.c 
-       -I %{ocaml:standard_library} -lasmrun_shared -lm -lunix)))
