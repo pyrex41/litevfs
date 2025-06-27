@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/your-org/distsqlite/pkg/distcore"
+	"distsqlite/pkg/distcore"
 )
 
 func TestValidateFilePath(t *testing.T) {

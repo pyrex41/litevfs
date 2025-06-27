@@ -6,6 +6,52 @@
 ✅ **Designed for 10-100x better bulk operation performance than Turso/LiteFS**  
 ✅ **Maintains simplicity with proven battle-tested components**
 
+## Core Architecture
+
+### 1. OCaml VFS Layer (`src/vfs_intercept.ml`, `src/distcore_stubs.c`)
+
+**High-performance SQLite VFS interception with zero-copy operations**
+
+- **OCaml VFS implementation** with page tracking and interception
+- **C stubs integration** for seamless SQLite integration
+- **Zero-copy page operations** using bigarrays
+- **Efficient binary diff engine** for rsync-style replication
+- **Lock-free queues** for high-throughput write processing
+
+Key features:
+- Intercepts SQLite reads/writes at the VFS level
+- Tracks dirty pages for efficient replication
+- Page-level binary diffing for minimal network usage
+- Integration with ZMQ for communication
+
+### 2. ZMQ Communication Layer (`pkg/zmq/`, `src/zmq_*.ml`)
+
+**Hybrid Go/OCaml ZMQ implementation**
+
+- **Go ZMQ transport** using pebbe/zmq4 for network communication
+- **OCaml ZMQ integration** for high-performance replication processing
+- **PUB/SUB patterns** for WAL diff streaming (small updates)
+- **REQ/REP patterns** for lease coordination
+- **Automatic fallback** to HTTP rsync for large updates
+
+### 3. Simple Lease Server (`pkg/leaseserver/`)
+
+**HTTP-based lease coordination without consensus overhead**
+
+- **Single primary writer** model with fence tokens
+- **HTTP REST API** for lease acquisition/renewal
+- **Automatic failover** when primary becomes unavailable
+- **No complex consensus** - simple and reliable
+
+### 4. LD_PRELOAD Injection (`cmd/distsqlite-inject/`)
+
+**Zero-change SQLite distribution**
+
+- **Transparent interception** of SQLite function calls
+- **Automatic sidecar startup** for process isolation
+- **OCaml VFS registration** for high-performance processing
+- **Fallback mechanisms** for compatibility
+
 ## Architecture Overview
 
 ### Core Innovation: VFS Instead of FUSE

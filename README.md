@@ -30,13 +30,14 @@ LD_PRELOAD=./build/distsqlite-inject.so your-sqlite-app
 - **Local-speed reads/writes** with intelligent sync
 - **Automatic failover** with Consul coordination
 
-## Components
+## Core Components
 
-- `cmd/distsqlite/` - Main sidecar binary
-- `pkg/vfs/` - SQLite VFS implementation 
-- `pkg/lease/` - Consul lease management
-- `pkg/replication/` - Hybrid replication engine
-- `pkg/rsync/` - sqlite3_rsync integration
+- `src/` - **OCaml VFS and performance engine** - High-performance SQLite VFS interception and replication
+- `pkg/distcore/` - Go bindings to OCaml performance engine
+- `pkg/zmq/` - ZMQ communication and transport layer
+- `pkg/leaseserver/` - Simple HTTP-based lease coordination
+- `pkg/rsync/` - HTTP-based rsync implementation
+- `cmd/` - Command-line binaries (sidecar, coordinator, lease server)
 
 ## Status
 

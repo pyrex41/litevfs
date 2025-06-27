@@ -67,12 +67,22 @@ $(BUILD_DIR)/distsqlite-coordinator: $(BUILD_DIR)/libdistcore.so $(wildcard cmd/
 	@echo "Building DistSQLite HTTP coordinator..."
 	cd cmd/distsqlite-coordinator && CGO_LDFLAGS="-L../../$(BUILD_DIR) -ldistcore" go build $(GO_BUILD_FLAGS) -o ../../$(BUILD_DIR)/distsqlite-coordinator .
 
-# Build LD_PRELOAD injection library
-$(BUILD_DIR)/distsqlite-inject.so: $(BUILD_DIR) cmd/distsqlite-inject/inject.c pkg/vfs/vfs.c
-	@echo "Building LD_PRELOAD injection library..."
+# Build ZMQ-based sidecar binary (uses OCaml VFS)
+$(BUILD_DIR)/distsqlite-zmq: $(BUILD_DIR)/libdistcore.so $(wildcard cmd/distsqlite-zmq/*.go) $(wildcard pkg/**/*.go)
+	@echo "Building DistSQLite ZMQ sidecar..."
+	cd cmd/distsqlite-zmq && CGO_LDFLAGS="-L../../$(BUILD_DIR) -ldistcore" go build $(GO_BUILD_FLAGS) -o ../../$(BUILD_DIR)/distsqlite-zmq .
+
+# Build lease server binary
+$(BUILD_DIR)/distsqlite-leaseserver: $(BUILD_DIR)/libdistcore.so $(wildcard cmd/distsqlite-leaseserver/*.go) $(wildcard pkg/**/*.go)
+	@echo "Building DistSQLite lease server..."
+	cd cmd/distsqlite-leaseserver && CGO_LDFLAGS="-L../../$(BUILD_DIR) -ldistcore" go build $(GO_BUILD_FLAGS) -o ../../$(BUILD_DIR)/distsqlite-leaseserver .
+
+# Build LD_PRELOAD injection library (uses OCaml VFS)
+$(BUILD_DIR)/distsqlite-inject.so: $(BUILD_DIR)/libdistcore.so cmd/distsqlite-inject/inject.c
+	@echo "Building LD_PRELOAD injection library with OCaml VFS..."
 	gcc $(CFLAGS) -o $(BUILD_DIR)/distsqlite-inject.so \
 		cmd/distsqlite-inject/inject.c \
-		pkg/vfs/vfs.c \
+		-L$(BUILD_DIR) -ldistcore \
 		$(LDFLAGS)
 
 test: test-ocaml test-go
@@ -121,10 +131,6 @@ bench-comparison: test-benchmarks test-benchmarks-ocaml
 	@echo "Performance comparison complete!"
 	@echo "Check benchmark results above for 10x improvement validation"
 
-test-vfs:
-	@echo "Running VFS unit tests..."
-	cd test/unit && gcc -o vfs_test vfs_test.c -lsqlite3 -I../../sqlite && ./vfs_test
-
 test-coverage:
 	@echo "Running tests with coverage..."
 	go test -v -coverprofile=coverage.out ./...
@@ -150,6 +156,9 @@ clean:
 
 install: build
 	sudo cp $(BUILD_DIR)/distsqlite /usr/local/bin/
+	sudo cp $(BUILD_DIR)/distsqlite-coordinator /usr/local/bin/
+	sudo cp $(BUILD_DIR)/distsqlite-zmq /usr/local/bin/
+	sudo cp $(BUILD_DIR)/distsqlite-leaseserver /usr/local/bin/
 	sudo cp $(BUILD_DIR)/distsqlite-inject.so /usr/local/lib/
 
 benchmark:
@@ -188,7 +197,6 @@ ipc-clean:
 
 lint:
 	golangci-lint run ./...
-	clang-format -i pkg/vfs/*.c cmd/distsqlite-inject/*.c
 
 # Demo targets
 demo-simple: build
@@ -197,7 +205,7 @@ demo-simple: build
 	$(BUILD_DIR)/distsqlite --data-dir ./demo-data &
 	@sleep 2
 	@echo "Terminal 2: Running application with DistSQLite"
-	cd test/integration && LD_PRELOAD=../../$(BUILD_DIR)/distsqlite-inject.so go run simple_demo.go
+	cd test/integration && LD_PRELOAD=../../$(BUILD_DIR)/distsqlite-inject.so LD_LIBRARY_PATH=../../$(BUILD_DIR) go run simple_demo.go
 
 demo-multi: build
 	@echo "Starting multi-node demo..."
@@ -209,7 +217,7 @@ demo-multi: build
 	$(BUILD_DIR)/distsqlite --hostname node2 --data-dir ./demo-data2 --targets node1:8080 --http-addr :8081 &
 	@sleep 2
 	@echo "Running demo on node1..."
-	cd test/integration && LD_PRELOAD=../../$(BUILD_DIR)/distsqlite-inject.so go run simple_demo.go
+	cd test/integration && LD_PRELOAD=../../$(BUILD_DIR)/distsqlite-inject.so LD_LIBRARY_PATH=../../$(BUILD_DIR) go run simple_demo.go
 
 stop-demo:
 	@pkill -f distsqlite || true
@@ -225,7 +233,7 @@ demo-http: build
 	$(BUILD_DIR)/distsqlite --coordination http --coordinator-url http://localhost:9090 --data-dir ./demo-data &
 	@sleep 2
 	@echo "Terminal 3: Running application with DistSQLite"
-	cd test/integration && LD_PRELOAD=../../$(BUILD_DIR)/distsqlite-inject.so go run simple_demo.go
+	cd test/integration && LD_PRELOAD=../../$(BUILD_DIR)/distsqlite-inject.so LD_LIBRARY_PATH=../../$(BUILD_DIR) go run simple_demo.go
 
 demo-http-multi: build
 	@echo "Starting multi-node HTTP coordination demo..."
@@ -239,9 +247,39 @@ demo-http-multi: build
 	$(BUILD_DIR)/distsqlite --coordination http --coordinator-url http://localhost:9090 --hostname node2 --data-dir ./demo-data2 --targets node1:8080 --http-addr :8081 &
 	@sleep 2
 	@echo "Running demo on node1..."
-	cd test/integration && LD_PRELOAD=../../$(BUILD_DIR)/distsqlite-inject.so go run simple_demo.go
+	cd test/integration && LD_PRELOAD=../../$(BUILD_DIR)/distsqlite-inject.so LD_LIBRARY_PATH=../../$(BUILD_DIR) go run simple_demo.go
 
 stop-http-demo:
 	@pkill -f distsqlite-coordinator || true
 	@pkill -f distsqlite || true
 	@echo "HTTP demo stopped"
+
+# ZMQ-based demos (using OCaml VFS)
+demo-zmq: build
+	@echo "Starting ZMQ coordination demo..."
+	@echo "Terminal 1: Starting ZMQ coordinator"
+	$(BUILD_DIR)/distsqlite-zmq --mode coordinator --endpoints tcp://localhost:5555 --node-id coordinator &
+	@sleep 2
+	@echo "Terminal 2: Starting ZMQ node"
+	$(BUILD_DIR)/distsqlite-zmq --mode node --endpoints tcp://localhost:5555 --node-id node1 --data-dir ./demo-data &
+	@sleep 2
+	@echo "Terminal 3: Running application with DistSQLite ZMQ"
+	cd test/integration && LD_PRELOAD=../../$(BUILD_DIR)/distsqlite-inject.so LD_LIBRARY_PATH=../../$(BUILD_DIR) go run simple_demo.go
+
+demo-zmq-multi: build
+	@echo "Starting multi-node ZMQ coordination demo..."
+	@echo "ZMQ coordinator:"
+	$(BUILD_DIR)/distsqlite-zmq --mode coordinator --endpoints tcp://localhost:5555 --node-id coordinator &
+	@sleep 2
+	@echo "Node 1:"
+	$(BUILD_DIR)/distsqlite-zmq --mode node --endpoints tcp://localhost:5555 --node-id node1 --data-dir ./demo-data1 &
+	@sleep 2
+	@echo "Node 2:"
+	$(BUILD_DIR)/distsqlite-zmq --mode node --endpoints tcp://localhost:5555 --node-id node2 --data-dir ./demo-data2 &
+	@sleep 2
+	@echo "Running demo on node1..."
+	cd test/integration && LD_PRELOAD=../../$(BUILD_DIR)/distsqlite-inject.so LD_LIBRARY_PATH=../../$(BUILD_DIR) go run simple_demo.go
+
+stop-zmq-demo:
+	@pkill -f distsqlite-zmq || true
+	@echo "ZMQ demo stopped"
