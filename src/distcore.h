@@ -32,6 +32,7 @@ typedef enum {
 /* Initialization and cleanup */
 void distcore_init(void);
 void distcore_cleanup(void);
+int distcore_health_check(void);
 
 /* Memory management functions */
 void distcore_cleanup_write_events(write_event_t* events, int count);

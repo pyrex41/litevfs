@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 )
 
 /*
 #include "../../src/distcore.h"
 #include <stdlib.h>
+#include <string.h>
 */
 import "C"
 
@@ -34,6 +36,16 @@ const (
 	ReplicaHashType  = 0x64
 	ReplicaReadyType = 0x65
 	ReplicaMsgType   = 0x66
+	
+	// Security limits
+	MaxMessageSize   = 16 * 1024 * 1024 // 16MB maximum message size
+	MaxPageSize      = 64 * 1024        // 64KB maximum page size
+	MaxPageCount     = 1000000          // 1M maximum pages
+	
+	// Timeout limits
+	ConnectionTimeout = 30 * time.Second  // 30s connection timeout
+	ReadTimeout      = 10 * time.Second   // 10s read timeout
+	WriteTimeout     = 10 * time.Second   // 10s write timeout
 )
 
 // SyncPage represents a page that needs syncing (from OCaml VFS)
@@ -42,6 +54,8 @@ type SyncPage struct {
 	Hash    string
 	Data    []byte
 }
+
+
 
 // SqliteRsyncSession manages a sync session using the sqlite3_rsync protocol
 type SqliteRsyncSession struct {
@@ -175,6 +189,17 @@ func (s *SqliteRsyncSession) RunReplicaSync() error {
 	pageSize := 1 << pageSizePow2
 	pageCount := int(msg.Payload[2])<<24 | int(msg.Payload[3])<<16 | int(msg.Payload[4])<<8 | int(msg.Payload[5])
 	
+	// Security: Validate parameters to prevent resource exhaustion
+	if protocol < 1 || protocol > 10 {
+		return fmt.Errorf("unsupported protocol version: %d", protocol)
+	}
+	if pageSize < 512 || pageSize > MaxPageSize {
+		return fmt.Errorf("invalid page size: %d (must be 512-%d)", pageSize, MaxPageSize)
+	}
+	if pageCount < 0 || pageCount > MaxPageCount {
+		return fmt.Errorf("invalid page count: %d (max %d)", pageCount, MaxPageCount)
+	}
+	
 	s.protocol = protocol
 	s.pageSize = pageSize
 	s.pageCount = pageCount
@@ -224,12 +249,40 @@ func (s *SqliteRsyncSession) sendOriginBegin() error {
 
 // sendDiffPages computes and sends pages that differ (delegates to OCaml VFS)
 func (s *SqliteRsyncSession) sendDiffPages(replicaHashes map[int]string) error {
-	// Note: Page tracking and diffing is handled by OCaml VFS
-	// This is just the protocol implementation
+	// Get sync pages from OCaml VFS
+	pageNums, pageHashes, pageData, err := s.engine.GetSyncPages(s.dbPath, s.pageCount)
+	if err != nil {
+		return fmt.Errorf("failed to get sync pages: %w", err)
+	}
 	
-	// TODO: Call OCaml VFS to get actual sync pages
-	// For now, send transaction completion with 0 pages
-	return s.sendOriginTxn(0)
+	// Compute diff against replica hashes
+	diffPages := make([]int, 0)
+	
+	for i, pageNum := range pageNums {
+		localHash := pageHashes[i]
+		replicaHash, exists := replicaHashes[pageNum]
+		
+		// Send page if replica doesn't have it or hashes differ
+		if !exists || localHash != replicaHash {
+			diffPages = append(diffPages, i)
+		}
+	}
+	
+	// Send differing pages
+	for _, idx := range diffPages {
+		page := SyncPage{
+			PageNum: pageNums[idx],
+			Hash:    pageHashes[idx],
+			Data:    pageData[idx],
+		}
+		
+		if err := s.sendOriginPage(page); err != nil {
+			return fmt.Errorf("failed to send page %d: %w", page.PageNum, err)
+		}
+	}
+	
+	// Send transaction completion
+	return s.sendOriginTxn(len(diffPages))
 }
 
 // sendOriginPage sends a single page
@@ -274,17 +327,36 @@ func (s *SqliteRsyncSession) sendReplicaBegin() error {
 
 // sendPageHashes sends page hashes to origin (delegates to OCaml VFS)
 func (s *SqliteRsyncSession) sendPageHashes() error {
-	// Note: Page hashing is handled by OCaml VFS
-	// This is just the protocol implementation
+	// Get page hashes from OCaml VFS
+	pageNums, pageHashes, _, err := s.engine.GetSyncPages(s.dbPath, s.pageCount)
+	if err != nil {
+		return fmt.Errorf("failed to get page hashes: %w", err)
+	}
 	
-	// TODO: Call OCaml VFS to get actual page hashes
-	// For now, send empty hash
-	emptyHash := make([]byte, 20)
+	// Send hash for each page
+	for i, pageNum := range pageNums {
+		if pageNum >= s.pageCount {
+			break // Don't exceed declared page count
+		}
+		
+		hash := pageHashes[i]
+		if len(hash) > 20 {
+			hash = hash[:20] // Truncate to 20 bytes (SHA-1 size)
+		}
+		
+		// Pad hash to 20 bytes if needed
+		hashBytes := make([]byte, 20)
+		copy(hashBytes, hash)
+		
+		if err := s.sendMessage(SqliteRsyncMessage{
+			Type:    ReplicaHashType,
+			Payload: hashBytes,
+		}); err != nil {
+			return fmt.Errorf("failed to send hash for page %d: %w", pageNum, err)
+		}
+	}
 	
-	return s.sendMessage(SqliteRsyncMessage{
-		Type:    ReplicaHashType,
-		Payload: emptyHash,
-	})
+	return nil
 }
 
 // sendReplicaReady sends ready message
@@ -331,16 +403,26 @@ func (s *SqliteRsyncSession) applyPage(payload []byte) error {
 	pageNum := int(payload[0])<<24 | int(payload[1])<<16 | int(payload[2])<<8 | int(payload[3])
 	pageData := payload[4:]
 	
-	// Note: Page application is handled by OCaml VFS
-	// This is just the protocol implementation
-	_ = pageNum
-	_ = pageData
+	// Security: Validate page data size
+	if len(pageData) > MaxPageSize {
+		return fmt.Errorf("page data too large: %d bytes (max %d)", len(pageData), MaxPageSize)
+	}
+	
+	// Apply page via OCaml VFS
+	if err := s.engine.ApplyPage(s.dbPath, pageNum, pageData); err != nil {
+		return fmt.Errorf("failed to apply page %d: %w", pageNum, err)
+	}
 	
 	return nil
 }
 
 // sendMessage sends a message over the connection
 func (s *SqliteRsyncSession) sendMessage(msg SqliteRsyncMessage) error {
+	// Set write timeout
+	if err := s.conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
+		return fmt.Errorf("failed to set write deadline: %w", err)
+	}
+	
 	// Send type
 	if _, err := s.conn.Write([]byte{msg.Type}); err != nil {
 		return err
@@ -370,6 +452,11 @@ func (s *SqliteRsyncSession) sendMessage(msg SqliteRsyncMessage) error {
 
 // receiveMessage receives a message from the connection
 func (s *SqliteRsyncSession) receiveMessage() (SqliteRsyncMessage, error) {
+	// Set read timeout
+	if err := s.conn.SetReadDeadline(time.Now().Add(ReadTimeout)); err != nil {
+		return SqliteRsyncMessage{}, fmt.Errorf("failed to set read deadline: %w", err)
+	}
+	
 	// Read type
 	typeBytes := make([]byte, 1)
 	if _, err := s.conn.Read(typeBytes); err != nil {
@@ -383,6 +470,14 @@ func (s *SqliteRsyncSession) receiveMessage() (SqliteRsyncMessage, error) {
 	}
 	
 	length := int(lengthBytes[0])<<24 | int(lengthBytes[1])<<16 | int(lengthBytes[2])<<8 | int(lengthBytes[3])
+	
+	// Security: Check message size limit to prevent DoS attacks
+	if length < 0 {
+		return SqliteRsyncMessage{}, fmt.Errorf("invalid message length: %d", length)
+	}
+	if length > MaxMessageSize {
+		return SqliteRsyncMessage{}, fmt.Errorf("message too large: %d bytes (max %d)", length, MaxMessageSize)
+	}
 	
 	// Read payload
 	var payload []byte

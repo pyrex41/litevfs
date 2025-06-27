@@ -11,6 +11,7 @@
 
 // OCaml VFS initialization (from the OCaml distcore library)
 extern int distcore_init(void);
+extern int distcore_health_check(void);
 
 // Function pointers to the real SQLite functions
 static int (*real_sqlite3_open_v2)(const char*, void**, int, const char*) = NULL;
@@ -73,8 +74,21 @@ static int startSidecar(void) {
         sidecar_pid = pid;
         printf("[DistSQLite] Sidecar started with PID %d\n", sidecar_pid);
         
-        // Give sidecar a moment to initialize
-        usleep(200000); // 200ms for OCaml initialization
+        // Wait for sidecar to initialize with proper health checks
+        int initialized = 0;
+        for (int attempts = 0; attempts < 100; attempts++) {
+            if (distcore_health_check() == 0) {
+                initialized = 1;
+                printf("[DistSQLite] OCaml VFS ready after %d attempts\n", attempts + 1);
+                break;
+            }
+            usleep(50000); // 50ms retry interval
+        }
+        
+        if (!initialized) {
+            fprintf(stderr, "[DistSQLite] Warning: OCaml VFS did not initialize within timeout\n");
+            // Continue anyway - might work with degraded functionality
+        }
         
         pthread_mutex_unlock(&sidecar_mutex);
         return 1;

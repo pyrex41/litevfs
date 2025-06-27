@@ -1,7 +1,7 @@
 package main
 
 import (
-	"context"
+	"fmt"
 	"testing"
 	"time"
 	
@@ -31,7 +31,7 @@ func TestComponentIntegration(t *testing.T) {
 	}
 	defer replicator.Stop()
 	
-	httpRsync := rsync.NewHTTPRsync("http://localhost:8080")
+	httpRsync := rsync.NewHTTPRsyncClient()
 	if httpRsync == nil {
 		t.Fatal("Failed to create HTTP rsync")
 	}
@@ -73,7 +73,7 @@ func TestReplicationRsyncIntegration(t *testing.T) {
 	replicator := replication.NewHybridReplicator([]string{"peer:8080"})
 	defer replicator.Stop()
 	
-	httpRsync := rsync.NewHTTPRsync("http://peer:8080")
+	httpRsync := rsync.NewHTTPRsyncClient()
 	
 	// Test that components can share configuration
 	if httpRsync == nil {
@@ -116,12 +116,28 @@ func TestConcurrentComponentUsage(t *testing.T) {
 		go func(id int) {
 			defer func() { done <- true }()
 			
-			// These operations should be thread-safe
-			_ = coord
-			_ = replicator
+			// Test real operations that should be thread-safe
+			// Test replicator health check
+			if !replicator.IsHealthy() {
+				t.Errorf("Worker %d: Replicator reported unhealthy", id)
+			}
 			
-			// Replicator operations
-			_ = replicator
+			// Test recording changes
+			err := replicator.RecordChange(
+				fmt.Sprintf("/test/db%d.sqlite", id),
+				"write",
+				1024,
+				[]byte("test data"),
+			)
+			if err != nil {
+				t.Errorf("Worker %d: Failed to record change: %v", id, err)
+			}
+			
+			// Test getting stats
+			stats := replicator.GetStats()
+			if stats == nil {
+				t.Errorf("Worker %d: GetStats returned nil", id)
+			}
 		}(i)
 	}
 	
@@ -135,15 +151,12 @@ func TestConcurrentComponentUsage(t *testing.T) {
 
 // TestComponentLifecycle tests component startup and shutdown
 func TestComponentLifecycle(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	
-	replicator := replication.NewHybridReplicator("test-node", []string{"peer:8080"})
+	replicator := replication.NewHybridReplicator([]string{"peer:8080"})
 	
 	// Test lifecycle management
 	startDone := make(chan bool)
 	go func() {
-		replicator.Start(ctx)
+		replicator.Start()
 		startDone <- true
 	}()
 	
@@ -178,7 +191,25 @@ func TestErrorHandlingIntegration(t *testing.T) {
 	defer rep1.Stop()
 	
 	// Test invalid configurations don't panic
-	_ = rsync.NewHTTPRsync("") // Empty URL
+	_ = rsync.NewHTTPRsyncClient() // HTTP rsync client
+	
+	// Test error conditions in replication
+	// Test with invalid file path
+	err := rep1.RecordChange("", "write", 1024, []byte("test"))
+	if err == nil {
+		t.Error("Expected error for empty file path")
+	}
+	
+	// Test with negative size
+	err = rep1.RecordChange("/test.db", "write", -1, []byte("test"))
+	if err == nil {
+		t.Error("Expected error for negative size")
+	}
+	
+	// Test with oversized data
+	largeData := make([]byte, 1024*1024*10) // 10MB
+	err = rep1.RecordChange("/test.db", "write", int64(len(largeData)), largeData)
+	// Should not panic, might warn or handle gracefully
 	
 	t.Log("✅ Error handling integration validated")
 }

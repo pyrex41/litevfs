@@ -418,3 +418,98 @@ func NewBinaryDiffer() (*BinaryDiffer, error) {
 func (d *BinaryDiffer) ComputeDiff(oldDB, newDB []byte, pageSize int) ([]byte, error) {
 	return d.engine.ComputeDatabaseDiff(oldDB, newDB, pageSize)
 }
+
+// VFS-specific methods for sqlite_rsync integration
+
+// GetSyncPages gets pages and their hashes from OCaml VFS
+func (e *OCamlEngine) GetSyncPages(dbPath string, maxPages int) ([]int, []string, [][]byte, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	
+	if !e.initialized {
+		return nil, nil, nil, fmt.Errorf("engine not initialized")
+	}
+	
+	const MaxPageCount = 1000000 // Import constant from sqlite_rsync
+	if maxPages <= 0 || maxPages > MaxPageCount {
+		return nil, nil, nil, fmt.Errorf("invalid max pages: %d", maxPages)
+	}
+	
+	// Convert Go string to C string
+	cPath := C.CString(dbPath)
+	defer C.free(unsafe.Pointer(cPath))
+	
+	// Allocate arrays for C function
+	pageNums := make([]C.int, maxPages)
+	pageHashes := make([]*C.char, maxPages)
+	pageData := make([]*C.char, maxPages)
+	
+	// Call OCaml VFS to get sync pages
+	count := C.distcore_get_sync_pages(
+		unsafe.Pointer(cPath),
+		&pageNums[0],
+		&pageHashes[0],
+		&pageData[0],
+		C.int(maxPages),
+	)
+	
+	if count < 0 {
+		return nil, nil, nil, fmt.Errorf("OCaml VFS error getting sync pages")
+	}
+	
+	actualCount := int(count)
+	
+	// Convert results back to Go
+	goPageNums := make([]int, actualCount)
+	goPageHashes := make([]string, actualCount)
+	goPageData := make([][]byte, actualCount)
+	
+	for i := 0; i < actualCount; i++ {
+		goPageNums[i] = int(pageNums[i])
+		
+		if pageHashes[i] != nil {
+			goPageHashes[i] = C.GoString(pageHashes[i])
+		}
+		
+		if pageData[i] != nil {
+			// Get page data - assume standard 4KB pages for now
+			pageSize := 4096
+			goPageData[i] = C.GoBytes(unsafe.Pointer(pageData[i]), C.int(pageSize))
+		}
+	}
+	
+	return goPageNums, goPageHashes, goPageData, nil
+}
+
+// ApplyPage applies a page to the database via OCaml VFS
+func (e *OCamlEngine) ApplyPage(dbPath string, pageNum int, pageData []byte) error {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	
+	if !e.initialized {
+		return fmt.Errorf("engine not initialized")
+	}
+	
+	// Convert Go data to C
+	cPath := C.CString(dbPath)
+	defer C.free(unsafe.Pointer(cPath))
+	
+	if len(pageData) == 0 {
+		return fmt.Errorf("empty page data")
+	}
+	
+	// Call OCaml VFS to apply the page
+	// For now, we'll use the write intercept function
+	result := C.distcore_vfs_intercept_write(
+		unsafe.Pointer(cPath),
+		(*C.char)(unsafe.Pointer(&pageData[0])),
+		C.int64_t(pageNum*len(pageData)),
+		C.int(len(pageData)),
+	)
+	
+	if result != 0 {
+		return fmt.Errorf("OCaml VFS error applying page %d", pageNum)
+	}
+	
+	return nil
+}
