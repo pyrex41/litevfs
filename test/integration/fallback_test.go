@@ -278,7 +278,12 @@ func (s *MockLeaseServer) Stop() error {
 
 func (s *MockLeaseServer) DisableZMQ() {
 	// Simulate ZMQ failure by closing socket
-	s.zmqSocket.Close()
+	if s.zmqSocket != nil {
+		if err := s.zmqSocket.Close(); err != nil {
+			log.Printf("Warning: Error closing ZMQ socket: %v", err)
+		}
+		s.zmqSocket = nil
+	}
 }
 
 func (s *MockLeaseServer) runZMQServer(ctx context.Context) {
@@ -332,9 +337,25 @@ func (s *MockLeaseServer) processLeaseRequest(msg map[string]interface{}) map[st
 
 func (s *MockLeaseServer) handleHTTPAcquire(w http.ResponseWriter, r *http.Request) {
 	var req map[string]string
-	json.NewDecoder(r.Body).Decode(&req)
-
+	
+	// Add input validation
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	
 	id := req["id"]
+	if id == "" {
+		http.Error(w, "Missing lease ID", http.StatusBadRequest)
+		return
+	}
+	
+	// Basic sanitization
+	if len(id) > 255 {
+		http.Error(w, "Lease ID too long", http.StatusBadRequest)
+		return
+	}
+	
 	if _, exists := s.leases[id]; !exists {
 		token := fmt.Sprintf("http_token_%s_%d", id, time.Now().Unix())
 		s.leases[id] = token
@@ -346,9 +367,19 @@ func (s *MockLeaseServer) handleHTTPAcquire(w http.ResponseWriter, r *http.Reque
 
 func (s *MockLeaseServer) handleHTTPRelease(w http.ResponseWriter, r *http.Request) {
 	var req map[string]string
-	json.NewDecoder(r.Body).Decode(&req)
-
+	
+	// Add input validation
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	
 	id := req["id"]
+	if id == "" {
+		http.Error(w, "Missing lease ID", http.StatusBadRequest)
+		return
+	}
+	
 	if _, exists := s.leases[id]; exists {
 		delete(s.leases, id)
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true})

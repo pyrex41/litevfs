@@ -279,13 +279,21 @@ func benchmarkZMQPingPong(t *testing.T, iterations int) time.Duration {
 	if err != nil {
 		t.Fatalf("Failed to create REP socket: %v", err)
 	}
-	defer rep.Close()
+	defer func() {
+		if err := rep.Close(); err != nil {
+			t.Logf("Warning: Error closing REP socket: %v", err)
+		}
+	}()
 
 	req, err := zmq4.NewSocket(zmq4.REQ)
 	if err != nil {
 		t.Fatalf("Failed to create REQ socket: %v", err)
 	}
-	defer req.Close()
+	defer func() {
+		if err := req.Close(); err != nil {
+			t.Logf("Warning: Error closing REQ socket: %v", err)
+		}
+	}()
 
 	endpoint := "tcp://127.0.0.1:5561"
 	if err := rep.Bind(endpoint); err != nil {

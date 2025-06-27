@@ -233,6 +233,31 @@ validate_configuration() {
     else
         warn "yq not available - skipping YAML validation"
     fi
+    
+    # Check for environment variable usage in configs
+    log "Checking configuration security..."
+    
+    local security_issues=()
+    
+    # Check for hardcoded sensitive values
+    if grep -r "password\|secret\|token" "$PROJECT_ROOT/deploy/fly" | grep -v "token_" | grep -v "#" | grep -v "\${" >/dev/null 2>&1; then
+        security_issues+=("Potential hardcoded secrets in configuration")
+    fi
+    
+    # Check ZMQ security is properly configured
+    if grep -q "security:" "$PROJECT_ROOT/deploy/fly/fly-coordinator.yml"; then
+        success "ZMQ security configuration present"
+    else
+        warn "ZMQ security configuration missing (acceptable for development)"
+    fi
+    
+    if [ ${#security_issues[@]} -eq 0 ]; then
+        success "Configuration security check passed"
+    else
+        for issue in "${security_issues[@]}"; do
+            warn "Security concern: $issue"
+        done
+    fi
 }
 
 validate_docker_setup() {

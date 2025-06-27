@@ -35,15 +35,17 @@ func NewMetrics() *Metrics {
 }
 
 func (m *Metrics) RecordOp(latency time.Duration, success bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	
+	// Use atomic operations for counters
 	atomic.AddInt64(&m.TotalOps, 1)
 	if success {
 		atomic.AddInt64(&m.SuccessfulOps, 1)
 	} else {
 		atomic.AddInt64(&m.FailedOps, 1)
 	}
+	
+	// Protect latency calculations with mutex
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	
 	m.TotalLatency += latency
 	if latency < m.MinLatency {

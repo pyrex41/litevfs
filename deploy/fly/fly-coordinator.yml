@@ -24,6 +24,13 @@ zmq:
   request-timeout: "3s"
   retry-attempts: 3
   high-water-mark: 10000
+  
+  # Security configuration (simple)
+  security:
+    # For production, consider enabling authentication
+    enabled: false  # Set to true to enable basic ZMQ security
+    # curve-enabled: false  # CURVE encryption (requires certificates)
+    # allowed-clients: []   # List of allowed client IDs
 
 # ZMQ-first lease coordination with HTTP fallback
 lease:

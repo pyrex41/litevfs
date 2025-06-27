@@ -26,6 +26,12 @@ zmq:
   retry-attempts: 5
   reconnect-interval: "2s"
   
+  # Connection pooling for sustained loads
+  connection-pool:
+    enabled: true
+    max-connections: 10
+    idle-timeout: "5m"
+  
   # Subscription settings for WAL diffs
   diff-subscription: "all"  # Subscribe to all WAL changes
   heartbeat-interval: "10s"

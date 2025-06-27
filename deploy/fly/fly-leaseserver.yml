@@ -21,14 +21,14 @@ log-dir: "/app/logs"
 
 # Lease configuration
 lease:
-  # Faster failover on Fly.io's reliable network
-  default-ttl: "10s"
-  max-ttl: "300s"
-  min-ttl: "1s"
+  # Configurable TTL values with reasonable defaults
+  default-ttl: "${LEASE_DEFAULT_TTL:-10s}"
+  max-ttl: "${LEASE_MAX_TTL:-300s}"
+  min-ttl: "${LEASE_MIN_TTL:-1s}"
   
   # Cleanup settings
-  cleanup-interval: "30s"
-  expired-lease-retention: "60s"
+  cleanup-interval: "${LEASE_CLEANUP_INTERVAL:-30s}"
+  expired-lease-retention: "${LEASE_RETENTION:-60s}"
   
   # Multi-region settings
   enable-region-awareness: true

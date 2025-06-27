@@ -24,11 +24,24 @@ case "$DISTSQLITE_ROLE" in
     "node")
         echo "Starting node mode..."
         
-        # Wait for coordinator to be available
+        # Wait for coordinator to be available with exponential backoff
         echo "Waiting for coordinator..."
+        retry_count=0
+        max_retries=30
+        delay=1
+        
         while ! nc -z coordinator.internal 5555; do
-            sleep 1
+            if [ $retry_count -ge $max_retries ]; then
+                echo "ERROR: Coordinator not available after $max_retries attempts"
+                exit 1
+            fi
+            echo "Coordinator not ready, retrying in ${delay}s (attempt $((retry_count + 1))/$max_retries)"
+            sleep $delay
+            retry_count=$((retry_count + 1))
+            # Exponential backoff with max delay of 8s
+            delay=$((delay < 8 ? delay * 2 : 8))
         done
+        echo "Coordinator is ready!"
         
         # Start node
         exec /app/bin/distsqlite \
@@ -48,10 +61,32 @@ case "$DISTSQLITE_ROLE" in
     "test")
         echo "Starting test mode..."
         
-        # Wait for all services
+        # Wait for all services with proper error handling
         echo "Waiting for services..."
-        while ! nc -z coordinator.internal 5555; do sleep 1; done
-        while ! nc -z leaseserver.internal 8080; do sleep 1; done
+        
+        wait_for_service() {
+            local service=$1
+            local port=$2
+            local retry_count=0
+            local max_retries=30
+            local delay=1
+            
+            echo "Waiting for $service:$port..."
+            while ! nc -z "$service" "$port"; do
+                if [ $retry_count -ge $max_retries ]; then
+                    echo "ERROR: $service:$port not available after $max_retries attempts"
+                    return 1
+                fi
+                echo "$service:$port not ready, retrying in ${delay}s (attempt $((retry_count + 1))/$max_retries)"
+                sleep $delay
+                retry_count=$((retry_count + 1))
+                delay=$((delay < 8 ? delay * 2 : 8))
+            done
+            echo "$service:$port is ready!"
+        }
+        
+        wait_for_service coordinator.internal 5555 || exit 1
+        wait_for_service leaseserver.internal 8080 || exit 1
         
         # Run test suite
         cd /app
