@@ -1,0 +1,152 @@
+# DistSQLite Node Configuration for Fly.io
+hostname: "${FLY_REGION}-${FLY_MACHINE_ID}"
+advertise-url: "http://${FLY_REGION}-node.internal:8080"
+
+# Fly.io optimized paths  
+data-dir: "/app/data"
+log-dir: "/app/logs"
+
+# HTTP API server
+http-addr: "0.0.0.0:8080"
+
+# ZMQ Transport Configuration
+zmq:
+  # Connect to coordinator via private network
+  coordinator-endpoints:
+    - "tcp://coordinator.internal:5555"
+    - "tcp://coordinator-${FLY_PRIMARY_REGION}.internal:5555"
+  
+  # Node-specific ZMQ settings
+  node-id: "${FLY_REGION}-${FLY_MACHINE_ID}"
+  use-private-network: true
+  flyio-app-name: "${FLY_APP_NAME}"
+  
+  # Client configuration
+  request-timeout: "5s"
+  retry-attempts: 5
+  reconnect-interval: "2s"
+  
+  # Connection pooling for sustained loads
+  connection-pool:
+    enabled: true
+    max-connections: 10
+    idle-timeout: "5m"
+  
+  # Subscription settings for WAL diffs
+  diff-subscription: "all"  # Subscribe to all WAL changes
+  heartbeat-interval: "10s"
+  
+  # CURVE Security Configuration (client mode)
+  security:
+    enabled: false           # Set to true to enable ZMQ CURVE authentication
+    curve_enabled: false     # CURVE encryption and authentication
+    
+    # Server's public key (who we're connecting to - coordinator/leaseserver)
+    # In production, get this from the server configuration
+    server_public_key: ""    # Z85 encoded server public key
+    
+    # This node's client key pair
+    # In production, generate unique keys per node and inject via secrets
+    client_public_key: ""    # Z85 encoded client public key
+    client_secret_key: ""    # Z85 encoded client secret key
+    
+    # For development/testing, use the test keys from ZMQ documentation:
+    # server_public_key: "rq:rM>}U?@Lns47E1%kR.o@n%FcmmsL/@{H8]yf7"
+    # client_public_key: "Yne@$w-vo<fVvi]a<NY6T1ed:M$fCG*[IaLV{hID"
+    # client_secret_key: "D:)Q[IlAW!ahhC2ac:9*A}h:p?([4%wOTJ%JR%cs"
+
+# ZMQ-first lease coordination with HTTP fallback
+lease:
+  # Primary ZMQ lease coordination
+  zmq-endpoints:
+    - "tcp://leaseserver.internal:5558"
+    - "tcp://coordinator.internal:5558"
+  
+  # HTTP fallback endpoints  
+  http-endpoints:
+    - "${LEASE_SERVER_URL:-http://leaseserver.internal:8080}"
+  
+  # Transport settings
+  transport-preference: "zmq"
+  connection-timeout: "2s"
+  retry-zmq-attempts: 3
+
+# Regional peer discovery
+region-peers:
+  ord: ["node-ord-1.internal", "node-ord-2.internal"]
+  iad: ["node-iad-1.internal", "node-iad-2.internal"]  
+  lax: ["node-lax-1.internal", "node-lax-2.internal"]
+  fra: ["node-fra-1.internal", "node-fra-2.internal"]
+
+# Replication settings for regional nodes
+replication:
+  # Regional optimization
+  prefer-local-peers: true
+  cross-region-delay: "5s"
+  
+  # Smaller thresholds for faster sync
+  bulk-threshold: 262144  # 256KB
+  max-delay: "3s"
+  
+  # ZMQ rsync configuration
+  rsync:
+    transport: "zmq"
+    compression: "zstd"
+    bandwidth-limit: "500M"
+    timeout: "15m"
+    max-retries: 3
+    
+    # Regional failover
+    fallback-endpoints:
+      - "coordinator.internal:5555"
+      - "coordinator-${FLY_PRIMARY_REGION}.internal:5555"
+
+# Lease settings for nodes
+lease:
+  # Nodes don't hold primary leases, but participate in coordination
+  participate: true
+  heartbeat-interval: "3s"
+  
+# Database configuration
+database:
+  # WAL mode for better concurrency
+  journal-mode: "WAL"
+  synchronous: "NORMAL"
+  
+  # Fly.io SSD optimization
+  cache-size: 10000
+  temp-store: "MEMORY"
+  
+  # Connection pooling
+  max-connections: 100
+  idle-timeout: "5m"
+
+# Logging configuration
+logging:
+  level: "${LOG_LEVEL:-info}"
+  format: "json"
+  output: "/app/logs/node.log"
+  
+  # Region-specific logging
+  structured: true
+  include-region: true
+  include-machine-id: true
+  include-coordinator: true
+
+# Health and monitoring
+health:
+  endpoint: "/health"
+  detailed-endpoint: "/health/detail"
+  include-peers: true
+  
+metrics:
+  enabled: true  
+  listen-addr: "0.0.0.0:9091"
+  path: "/metrics"
+  
+  # Custom metrics for distributed testing
+  custom-metrics:
+    - "replication_lag"
+    - "zmq_message_rate" 
+    - "cross_region_latency"
+    - "lease_acquisition_time"

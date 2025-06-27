@@ -1,0 +1,173 @@
+# DistSQLite Lease Server Configuration for Fly.io
+# Simple HTTP-based lease coordination
+
+# Dual transport lease server (ZMQ + HTTP)
+hostname: "leaseserver"
+
+# ZMQ transport (primary)
+zmq:
+  bind-addr: "0.0.0.0:5558"
+  socket-type: "REP"  # REQ/REP pattern for lease requests
+  high-water-mark: 1000
+  request-timeout: "5s"
+  
+# HTTP transport (fallback)
+http:
+  bind-addr: "0.0.0.0:8080"
+
+# Fly.io optimized paths
+data-dir: "/app/data/leases"
+log-dir: "/app/logs"
+
+# Lease configuration
+lease:
+  # Configurable TTL values with reasonable defaults
+  default-ttl: "${LEASE_DEFAULT_TTL:-10s}"
+  max-ttl: "${LEASE_MAX_TTL:-300s}"
+  min-ttl: "${LEASE_MIN_TTL:-1s}"
+  
+  # Cleanup settings
+  cleanup-interval: "${LEASE_CLEANUP_INTERVAL:-30s}"
+  expired-lease-retention: "${LEASE_RETENTION:-60s}"
+  
+  # Multi-region settings
+  enable-region-awareness: true
+  prefer-local-region: true
+
+# HTTP API settings (continued)
+http-settings:
+  read-timeout: "10s"
+  write-timeout: "10s"
+  idle-timeout: "60s"
+  max-header-bytes: 1048576
+  
+  # Enable CORS for cross-region access
+  enable-cors: true
+  cors-origins: ["*.internal", "*.fly.dev"]
+
+# Performance and reliability
+storage:
+  # Use file-based storage for persistence across restarts
+  type: "file"
+  file-path: "/app/data/leases/leases.json"
+  sync-interval: "5s"
+  backup-interval: "60s"
+  max-backups: 10
+
+# Multi-region coordination
+regions:
+  primary: "${FLY_PRIMARY_REGION:-ord}"
+  current: "${FLY_REGION}"
+  
+  # Cross-region lease server endpoints for failover
+  peers:
+    - "leaseserver-ord.internal:8080"
+    - "leaseserver-iad.internal:8080"
+    - "leaseserver-lax.internal:8080"
+    - "leaseserver-fra.internal:8080"
+
+# Monitoring and health checks
+health:
+  endpoint: "/health"
+  detailed-endpoint: "/health/detail"
+  
+  # Custom health checks
+  checks:
+    - name: "lease-storage"
+      endpoint: "/health/storage"
+    - name: "region-connectivity"
+      endpoint: "/health/regions"
+
+# Logging
+logging:
+  level: "${LOG_LEVEL:-info}"
+  format: "json"
+  output: "/app/logs/leaseserver.log"
+  
+  # Fly.io specific logging
+  structured: true
+  include-region: true
+  include-machine-id: true
+  access-log: true
+
+# Metrics for monitoring
+metrics:
+  enabled: true
+  listen-addr: "0.0.0.0:9092"
+  path: "/metrics"
+  
+  # Custom metrics
+  custom-metrics:
+    - "active_leases"
+    - "lease_acquisition_rate"
+    - "lease_expiration_rate"
+    - "cross_region_requests"
+
+# API endpoints
+api:
+  # Lease management
+  acquire: "/lease/acquire"
+  release: "/lease/release"
+  renew: "/lease/renew"
+  status: "/lease/status"
+  
+  # Administrative
+  list: "/admin/leases"
+  cleanup: "/admin/cleanup"
+  stats: "/admin/stats"
+
+# ZMQ-first Lease Server Configuration for Fly.io
+# Uses ZMQ as primary transport with HTTP fallback
+name: "distsqlite-leaseserver"
+listen_addr: "0.0.0.0:8080"
+mode: "lease"
+
+# ZMQ Transport Configuration
+zmq:
+  enabled: true
+  bind_addr: "0.0.0.0:5558"
+  ipc_base_path: "/tmp/distsqlite"
+  use_private_network: true
+  flyio_app_name: "distsqlite"
+  request_timeout: "5s"
+  retry_attempts: 3
+  
+  # CURVE Security (disabled by default, enable for production)
+  security:
+    enabled: false
+    curve_enabled: false
+    # Production keys should be generated separately and injected via secrets
+    # server_public_key: ""
+    # server_secret_key: ""
+    # Use test keys for development:
+    # server_public_key: "rq:rM>}U?@Lns47E1%kR.o@n%FcmmsL/@{H8]yf7"
+    # server_secret_key: "JTKVSB%%)wK0E.X)V>+}o?pNmC{O&4W4b!Ni{Lh6"
+
+# HTTP Fallback Configuration
+http:
+  enabled: true
+  fallback_only: true
+  
+# Consul Backend (for HTTP mode)
+consul:
+  address: "consul.service.consul:8500"
+  datacenter: "dc1"
+  token: ""
+  tls:
+    enabled: false
+
+# Lease Configuration  
+lease:
+  default_ttl: "30s"
+  max_ttl: "300s"
+  cleanup_interval: "10s"
+
+# Metrics
+metrics:
+  enabled: true
+  port: 9090
+
+# Logging
+logging:
+  level: "info"
+  format: "json"

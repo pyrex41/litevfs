@@ -1,0 +1,108 @@
+app = "distsqlite-test"
+primary_region = "ord"
+
+[build]
+  dockerfile = "Dockerfile.fly"
+
+[env]
+  DISTSQLITE_ROLE = "coordinator"
+  DISTSQLITE_ZMQ_BIND = "0.0.0.0:5555"
+  DISTSQLITE_PRIVATE_NETWORK = "true"
+  LEASE_SERVER_URL = "http://leaseserver.internal:8080"
+
+[[services]]
+  http_checks = []
+  internal_port = 5555
+  processes = ["app"]
+  protocol = "tcp"
+  script_checks = []
+
+  [services.concurrency]
+    hard_limit = 1000
+    soft_limit = 800
+    type = "connections"
+
+  [[services.ports]]
+    force_https = false
+    handlers = []
+    port = 5555
+
+  [[services.tcp_checks]]
+    grace_period = "10s"
+    interval = "30s"
+    restart_limit = 0
+    timeout = "5s"
+
+# Coordinator service (primary node)
+[[services]]
+  http_checks = []
+  internal_port = 8080
+  processes = ["app"]
+  protocol = "tcp"
+
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
+
+  [services.concurrency]
+    hard_limit = 500
+    soft_limit = 400
+    type = "connections"
+
+# ZMQ Diff broadcasting port
+[[services]]
+  http_checks = []
+  internal_port = 5556
+  processes = ["app"]
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 5556
+
+# ZMQ Router port
+[[services]]
+  http_checks = []
+  internal_port = 5557
+  processes = ["app"]
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 5557
+
+# ZMQ Lease port
+[[services]]
+  http_checks = []
+  internal_port = 5558
+  processes = ["app"]
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 5558
+
+[processes]
+  app = "distsqlite-coordinator"
+  node = "distsqlite --config /app/config/fly-node.yml"
+  leaseserver = "distsqlite-leaseserver --config /app/config/fly-leaseserver.yml"
+
+[checks]
+  [checks.zmq_health]
+    grace_period = "5s"
+    interval = "10s"
+    method = "get"
+    path = "/health/zmq"
+    port = 8080
+    timeout = "3s"
+    type = "http"
+
+  [checks.lease_health]
+    grace_period = "5s"
+    interval = "15s"
+    method = "get"
+    path = "/health/lease"
+    port = 8080
+    timeout = "5s"
+    type = "http"

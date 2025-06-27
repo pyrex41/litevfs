@@ -56,9 +56,23 @@ type TransportConfig struct {
 	UsePrivateNetwork bool   `yaml:"use_private_network"`
 	FlyIOAppName      string `yaml:"flyio_app_name"`
 
+	// CURVE security settings
+	Security SecurityConfig `yaml:"security"`
+
 	// Timeouts
 	RequestTimeout time.Duration `yaml:"request_timeout"`
 	RetryAttempts  int           `yaml:"retry_attempts"`
+}
+
+// SecurityConfig defines ZMQ CURVE security settings
+type SecurityConfig struct {
+	Enabled           bool   `yaml:"enabled"`
+	CurveEnabled      bool   `yaml:"curve_enabled"`
+	ServerPublicKey   string `yaml:"server_public_key"`
+	ServerSecretKey   string `yaml:"server_secret_key"`
+	ClientPublicKey   string `yaml:"client_public_key"`
+	ClientSecretKey   string `yaml:"client_secret_key"`
+	AllowedClients    []string `yaml:"allowed_clients"`
 }
 
 // DefaultTransportConfig returns sensible defaults
@@ -68,10 +82,25 @@ func DefaultTransportConfig() *TransportConfig {
 		BindAddr:          "0.0.0.0:5555",
 		Peers:             []string{},
 		UsePrivateNetwork: false,
-		RequestTimeout:    5 * time.Second,
-		RetryAttempts:     3,
+		Security: SecurityConfig{
+			Enabled:      false,
+			CurveEnabled: false,
+		},
+		RequestTimeout: 5 * time.Second,
+		RetryAttempts:  3,
 	}
 }
+
+// Test keys from ZMQ CURVE documentation
+const (
+	// Server test keys (Z85 encoded)
+	TestServerPublicKey  = "rq:rM>}U?@Lns47E1%kR.o@n%FcmmsL/@{H8]yf7"
+	TestServerSecretKey  = "JTKVSB%%)wK0E.X)V>+}o?pNmC{O&4W4b!Ni{Lh6"
+	
+	// Client test keys (Z85 encoded) 
+	TestClientPublicKey  = "Yne@$w-vo<fVvi]a<NY6T1ed:M$fCG*[IaLV{hID"
+	TestClientSecretKey  = "D:)Q[IlAW!ahhC2ac:9*A}h:p?([4%wOTJ%JR%cs"
+)
 
 // NewTransport creates a new ZMQ transport
 func NewTransport(config *TransportConfig, nodeID string) (*Transport, error) {
@@ -99,6 +128,68 @@ func NewTransport(config *TransportConfig, nodeID string) (*Transport, error) {
 	return t, nil
 }
 
+// configureCurveServer sets up CURVE server authentication on a socket
+func (t *Transport) configureCurveServer(socket *zmq4.Socket) error {
+	if !t.config.Security.Enabled || !t.config.Security.CurveEnabled {
+		return nil
+	}
+
+	// Set server mode
+	if err := socket.SetCurveServer(1); err != nil {
+		return fmt.Errorf("failed to set CURVE server: %w", err)
+	}
+
+	// Use configured or test server secret key
+	secretKey := t.config.Security.ServerSecretKey
+	if secretKey == "" {
+		secretKey = TestServerSecretKey
+		log.Printf("[ZMQ Security] Using test server keys (development only)")
+	}
+
+	if err := socket.SetCurveSecretkey(secretKey); err != nil {
+		return fmt.Errorf("failed to set CURVE server secret key: %w", err)
+	}
+
+	log.Printf("[ZMQ Security] CURVE server authentication enabled")
+	return nil
+}
+
+// configureCurveClient sets up CURVE client authentication on a socket
+func (t *Transport) configureCurveClient(socket *zmq4.Socket) error {
+	if !t.config.Security.Enabled || !t.config.Security.CurveEnabled {
+		return nil
+	}
+
+	// Use configured or test keys
+	serverPublicKey := t.config.Security.ServerPublicKey
+	clientPublicKey := t.config.Security.ClientPublicKey
+	clientSecretKey := t.config.Security.ClientSecretKey
+
+	if serverPublicKey == "" || clientPublicKey == "" || clientSecretKey == "" {
+		serverPublicKey = TestServerPublicKey
+		clientPublicKey = TestClientPublicKey
+		clientSecretKey = TestClientSecretKey
+		log.Printf("[ZMQ Security] Using test client keys (development only)")
+	}
+
+	// Set server public key (who we're connecting to)
+	if err := socket.SetCurveServerkey(serverPublicKey); err != nil {
+		return fmt.Errorf("failed to set CURVE server public key: %w", err)
+	}
+
+	// Set client key pair
+	if err := socket.SetCurvePublickey(clientPublicKey); err != nil {
+		return fmt.Errorf("failed to set CURVE client public key: %w", err)
+	}
+
+	if err := socket.SetCurveSecretkey(clientSecretKey); err != nil {
+		return fmt.Errorf("failed to set CURVE client secret key: %w", err)
+	}
+
+	log.Printf("[ZMQ Security] CURVE client authentication enabled")
+	return nil
+}
+
 // StartCoordinator initializes transport in coordinator mode
 func (t *Transport) StartCoordinator() error {
 	t.mu.Lock()
@@ -110,6 +201,11 @@ func (t *Transport) StartCoordinator() error {
 	t.leaseRep, err = t.zmqCtx.NewSocket(zmq4.REP)
 	if err != nil {
 		return fmt.Errorf("failed to create lease REP socket: %w", err)
+	}
+
+	// Configure CURVE authentication for lease REP socket (server mode)
+	if err := t.configureCurveServer(t.leaseRep); err != nil {
+		return fmt.Errorf("failed to configure CURVE for lease REP socket: %w", err)
 	}
 
 	// Bind to address for lease requests
@@ -124,6 +220,11 @@ func (t *Transport) StartCoordinator() error {
 		return fmt.Errorf("failed to create diff PUB socket: %w", err)
 	}
 
+	// Configure CURVE authentication for diff PUB socket (server mode)
+	if err := t.configureCurveServer(t.diffPub); err != nil {
+		return fmt.Errorf("failed to configure CURVE for diff PUB socket: %w", err)
+	}
+
 	// Bind PUB socket for diff broadcasting
 	pubAddr := fmt.Sprintf("tcp://%s", incrementPort(t.config.BindAddr, 1))
 	if err := t.diffPub.Bind(pubAddr); err != nil {
@@ -134,6 +235,11 @@ func (t *Transport) StartCoordinator() error {
 	t.routerSock, err = t.zmqCtx.NewSocket(zmq4.ROUTER)
 	if err != nil {
 		return fmt.Errorf("failed to create ROUTER socket: %w", err)
+	}
+
+	// Configure CURVE authentication for ROUTER socket (server mode)
+	if err := t.configureCurveServer(t.routerSock); err != nil {
+		return fmt.Errorf("failed to configure CURVE for ROUTER socket: %w", err)
 	}
 
 	// Bind ROUTER socket
@@ -169,6 +275,11 @@ func (t *Transport) StartNode() error {
 		return fmt.Errorf("failed to create lease REQ socket: %w", err)
 	}
 
+	// Configure CURVE authentication for lease REQ socket (client mode)
+	if err := t.configureCurveClient(t.leaseReq); err != nil {
+		return fmt.Errorf("failed to configure CURVE for lease REQ socket: %w", err)
+	}
+
 	// Connect to coordinator lease endpoint
 	leaseEndpoint := coordinatorEndpoints[0]
 	if err := t.leaseReq.Connect(leaseEndpoint); err != nil {
@@ -179,6 +290,11 @@ func (t *Transport) StartNode() error {
 	t.diffSub, err = t.zmqCtx.NewSocket(zmq4.SUB)
 	if err != nil {
 		return fmt.Errorf("failed to create diff SUB socket: %w", err)
+	}
+
+	// Configure CURVE authentication for diff SUB socket (client mode)
+	if err := t.configureCurveClient(t.diffSub); err != nil {
+		return fmt.Errorf("failed to configure CURVE for diff SUB socket: %w", err)
 	}
 
 	// Connect to coordinator diff endpoint
@@ -196,6 +312,11 @@ func (t *Transport) StartNode() error {
 	t.dealerSock, err = t.zmqCtx.NewSocket(zmq4.DEALER)
 	if err != nil {
 		return fmt.Errorf("failed to create DEALER socket: %w", err)
+	}
+
+	// Configure CURVE authentication for DEALER socket (client mode)
+	if err := t.configureCurveClient(t.dealerSock); err != nil {
+		return fmt.Errorf("failed to configure CURVE for DEALER socket: %w", err)
 	}
 
 	// Set dealer identity to node ID
