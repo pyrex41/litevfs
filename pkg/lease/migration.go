@@ -8,52 +8,114 @@ import (
 	"time"
 )
 
-// LeaseTransferManager handles graceful lease migration
+// LeaseTransferManager handles graceful lease migration without disrupting active operations.
+// It provides mechanisms for quiescing write operations, waiting for completion,
+// and safely transferring lease ownership to another node.
+//
+// The manager uses atomic operations for thread-safe state management and prevents
+// race conditions during the transfer process.
 type LeaseTransferManager struct {
 	leaseManager LeaseManager
 	quiescing    int32 // atomic flag for quiescing mode
 	pendingOps   int32 // count of pending operations
+	
+	// Configuration
+	quiesceTimeout time.Duration
+	maxPendingOps  int32 // prevent overflow
 }
 
-// LeaseManager interface for different implementations
+// LeaseManager defines the interface for lease management implementations.
+// This interface abstracts different lease coordination mechanisms (HTTP, Consul, etc.)
+// and provides consistent operations for lease validation and lifecycle management.
 type LeaseManager interface {
+	// IsLeaseHolder returns true if this node currently holds the lease
 	IsLeaseHolder() bool
+	
+	// GetCurrentFenceToken returns the current fence token for the lease
 	GetCurrentFenceToken() int64
+	
+	// ValidateWrite validates a write operation using the provided fence token
 	ValidateWrite(fenceToken int64) error
+	
+	// ReleaseLease releases the current lease, allowing other nodes to acquire it
 	ReleaseLease(ctx context.Context) error
 }
 
 // NewLeaseTransferManager creates a new transfer manager
 func NewLeaseTransferManager(lm LeaseManager) *LeaseTransferManager {
 	return &LeaseTransferManager{
-		leaseManager: lm,
+		leaseManager:   lm,
+		quiesceTimeout: 5 * time.Second,
+		maxPendingOps:  10000, // prevent overflow
 	}
+}
+
+// SetQuiesceTimeout configures the timeout for waiting for pending operations
+func (ltm *LeaseTransferManager) SetQuiesceTimeout(timeout time.Duration) {
+	ltm.quiesceTimeout = timeout
 }
 
 // BeginWrite checks if writes are allowed and increments pending operations
 func (ltm *LeaseTransferManager) BeginWrite(fenceToken int64) error {
-	// Check if we're in quiescing mode
-	if atomic.LoadInt32(&ltm.quiescing) != 0 {
-		return fmt.Errorf("node is quiescing - no new writes accepted")
-	}
-	
-	// Validate fence token
+	// Validate fence token first
 	if err := ltm.leaseManager.ValidateWrite(fenceToken); err != nil {
-		return err
+		return fmt.Errorf("fence token validation failed: %w", err)
 	}
 	
-	// Increment pending operations
-	atomic.AddInt32(&ltm.pendingOps, 1)
+	// Atomically check quiescing state and increment pending ops
+	for {
+		current := atomic.LoadInt32(&ltm.pendingOps)
+		
+		// Check bounds to prevent overflow
+		if current >= ltm.maxPendingOps {
+			return fmt.Errorf("too many pending operations: %d", current)
+		}
+		
+		// Check if we're in quiescing mode
+		if atomic.LoadInt32(&ltm.quiescing) != 0 {
+			return fmt.Errorf("node is quiescing - no new writes accepted")
+		}
+		
+		// Try to increment atomically
+		if atomic.CompareAndSwapInt32(&ltm.pendingOps, current, current+1) {
+			// Double-check quiescing state after increment (prevent race)
+			if atomic.LoadInt32(&ltm.quiescing) != 0 {
+				// We incremented but now we're quiescing - undo and fail
+				atomic.AddInt32(&ltm.pendingOps, -1)
+				return fmt.Errorf("node is quiescing - no new writes accepted")
+			}
+			break
+		}
+		// CAS failed, retry
+	}
+	
 	return nil
 }
 
 // EndWrite decrements pending operations count
 func (ltm *LeaseTransferManager) EndWrite() {
-	atomic.AddInt32(&ltm.pendingOps, -1)
+	// Ensure we don't go below zero
+	for {
+		current := atomic.LoadInt32(&ltm.pendingOps)
+		if current <= 0 {
+			// Already at zero or below - this is unexpected but handle gracefully
+			log.Printf("[Lease Migration] Warning: EndWrite called with no pending operations")
+			return
+		}
+		
+		if atomic.CompareAndSwapInt32(&ltm.pendingOps, current, current-1) {
+			return
+		}
+		// CAS failed, retry
+	}
 }
 
 // PrepareLeaseTransfer initiates graceful lease migration
 func (ltm *LeaseTransferManager) PrepareLeaseTransfer(ctx context.Context) error {
+	if ltm.leaseManager == nil {
+		return fmt.Errorf("lease manager is nil")
+	}
+	
 	if !ltm.leaseManager.IsLeaseHolder() {
 		return fmt.Errorf("not the lease holder")
 	}
@@ -64,41 +126,44 @@ func (ltm *LeaseTransferManager) PrepareLeaseTransfer(ctx context.Context) error
 	atomic.StoreInt32(&ltm.quiescing, 1)
 	log.Printf("[Lease Migration] Entered quiescing mode - no new writes accepted")
 	
-	// Step 2: Wait for pending writes to complete
-	timeout := 5 * time.Second
-	deadline := time.Now().Add(timeout)
+	// Step 2: Wait for pending writes to complete with context cancellation
+	timeoutCtx, cancel := context.WithTimeout(ctx, ltm.quiesceTimeout)
+	defer cancel()
 	
-	for time.Now().Before(deadline) {
-		pending := atomic.LoadInt32(&ltm.pendingOps)
-		if pending == 0 {
-			log.Printf("[Lease Migration] All pending writes completed")
-			break
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-timeoutCtx.Done():
+			pending := atomic.LoadInt32(&ltm.pendingOps)
+			// Reset quiescing mode on timeout
+			atomic.StoreInt32(&ltm.quiescing, 0)
+			if timeoutCtx.Err() == context.DeadlineExceeded {
+				return fmt.Errorf("timeout waiting for %d pending writes to complete", pending)
+			}
+			return fmt.Errorf("context cancelled while waiting for pending writes: %w", timeoutCtx.Err())
+			
+		case <-ticker.C:
+			pending := atomic.LoadInt32(&ltm.pendingOps)
+			if pending == 0 {
+				log.Printf("[Lease Migration] All pending writes completed")
+				return nil
+			}
+			log.Printf("[Lease Migration] Waiting for %d pending writes to complete", pending)
 		}
-		
-		log.Printf("[Lease Migration] Waiting for %d pending writes to complete", pending)
-		time.Sleep(100 * time.Millisecond)
 	}
-	
-	// Check if we timed out
-	if pending := atomic.LoadInt32(&ltm.pendingOps); pending > 0 {
-		// Reset quiescing mode and return error
-		atomic.StoreInt32(&ltm.quiescing, 0)
-		return fmt.Errorf("timeout waiting for %d pending writes to complete", pending)
-	}
-	
-	log.Printf("[Lease Migration] Ready for lease transfer")
-	return nil
 }
 
-// CompleteLeasetransfer finalizes the lease migration
-func (ltm *LeaseTransferManager) CompleteleaseTransfer(ctx context.Context) error {
-	defer func() {
-		// Reset quiescing mode regardless of outcome
-		atomic.StoreInt32(&ltm.quiescing, 0)
-	}()
+// CompleteLeaseTransfer finalizes the lease migration
+func (ltm *LeaseTransferManager) CompleteLeaseTransfer(ctx context.Context) error {
+	// Release the lease first
+	err := ltm.leaseManager.ReleaseLease(ctx)
 	
-	// Release the lease
-	if err := ltm.leaseManager.ReleaseLease(ctx); err != nil {
+	// Always reset quiescing mode, but preserve the original error
+	atomic.StoreInt32(&ltm.quiescing, 0)
+	
+	if err != nil {
 		return fmt.Errorf("failed to release lease: %w", err)
 	}
 	
@@ -116,20 +181,24 @@ func (ltm *LeaseTransferManager) GetPendingOperationsCount() int32 {
 	return atomic.LoadInt32(&ltm.pendingOps)
 }
 
-// SmartLeaseHolderSelection helps choose the best next lease holder
+// SmartLeaseHolderSelection implements intelligent lease holder selection
+// based on node metrics and performance characteristics. It considers factors
+// like region preference, latency, load, and replication lag to choose the
+// optimal node for lease ownership.
 type SmartLeaseHolderSelection struct {
 	nodes map[string]*NodeMetrics
 }
 
-// NodeMetrics tracks metrics for lease holder selection
+// NodeMetrics tracks performance and operational metrics for lease holder selection.
+// These metrics are used to score nodes and select the best candidate for lease ownership.
 type NodeMetrics struct {
-	NodeID          string
-	LastSeen        time.Time
-	WriteLatency    time.Duration
-	ReplicationLag  time.Duration
-	ActiveConnections int
-	Region          string
-	LoadAverage     float64
+	NodeID            string        // Unique identifier for the node
+	LastSeen          time.Time     // Last time this node was observed (for staleness)
+	WriteLatency      time.Duration // Average write operation latency
+	ReplicationLag    time.Duration // Current replication lag behind primary
+	ActiveConnections int           // Number of active database connections
+	Region            string        // Geographic or logical region
+	LoadAverage       float64       // System load average
 }
 
 // SelectBestLeaseHolder chooses the optimal node for lease transfer
@@ -213,6 +282,12 @@ func NewHTTPManagerWithTransfer(baseURL, key, hostname, advertiseURL string) *HT
 
 // ValidateWriteWithQuiescing validates writes considering quiescing mode
 func (hmt *HTTPManagerWithTransfer) ValidateWriteWithQuiescing(fenceToken int64) error {
+	if hmt.transferManager == nil {
+		return fmt.Errorf("transfer manager is nil")
+	}
+	if fenceToken <= 0 {
+		return fmt.Errorf("invalid fence token: %d", fenceToken)
+	}
 	return hmt.transferManager.BeginWrite(fenceToken)
 }
 
@@ -228,5 +303,5 @@ func (hmt *HTTPManagerWithTransfer) PrepareTransfer(ctx context.Context) error {
 
 // CompleteTransfer finalizes lease transfer
 func (hmt *HTTPManagerWithTransfer) CompleteTransfer(ctx context.Context) error {
-	return hmt.transferManager.CompleteleaseTransfer(ctx)
+	return hmt.transferManager.CompleteLeaseTransfer(ctx)
 }
