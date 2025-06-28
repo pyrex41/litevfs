@@ -26,6 +26,6 @@
         distcore_stubs.c \
         -I $OCAML_LIB \
         -L $OCAML_LIB \
-        -lasmrun_shared \
+        -lcamlrun_shared \
         -lsqlite3 -lm -ldl -lpthread
   ")))
