@@ -9,6 +9,7 @@
 #include <caml/custom.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdbool.h>    /* For bool type */
 #include <immintrin.h>  /* For SIMD intrinsics */
 #include <cpuid.h>      /* For CPU feature detection */
 

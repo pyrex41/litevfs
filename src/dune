@@ -2,14 +2,15 @@
  (public_name distsqlite-core)
  (name distcore)
  (modules distcore lock_free_queue binary_diff replication lease_state_machine)
- (libraries bigarray-compat))
+ (libraries bigarray-compat threads unix))
 
 (rule
  (targets libdistcore.so)
  (deps distcore_stubs.c distcore.cma)
  (action
-  (run gcc -shared -fPIC -O3 -DCAML_NAME_SPACE -o libdistcore.so 
+  (run gcc -shared -fPIC -O3 -march=native -mavx2 -DCAML_NAME_SPACE -o libdistcore.so 
        distcore_stubs.c 
        distcore.cma
        -I %{ocaml_where}
-       -lasmrun_shared -lm -lunix -ldl)))
+       -L %{ocaml_where}
+       -lcamlrun -lm -lunix -ldl)))

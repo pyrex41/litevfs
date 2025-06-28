@@ -206,11 +206,18 @@ module RsyncProtocol = struct
         Array1.set buffer 0 (Char.chr origin_end_type);
         buffer
         
-    | OriginError msg | OriginMsg msg ->
+    | OriginError msg ->
         let msg_len = String.length msg in
         let buffer = Array1.create char c_layout (5 + msg_len) in
-        let msg_type = if msg = OriginError msg then origin_error_type else origin_msg_type in
-        Array1.set buffer 0 (Char.chr msg_type);
+        Array1.set buffer 0 (Char.chr origin_error_type);
+        write_uint32 buffer 1 msg_len;
+        write_string buffer 5 msg;
+        buffer
+        
+    | OriginMsg msg ->
+        let msg_len = String.length msg in
+        let buffer = Array1.create char c_layout (5 + msg_len) in
+        Array1.set buffer 0 (Char.chr origin_msg_type);
         write_uint32 buffer 1 msg_len;
         write_string buffer 5 msg;
         buffer
@@ -242,16 +249,23 @@ module RsyncProtocol = struct
         Array1.set buffer 0 (Char.chr replica_end_type);
         buffer
         
-    | ReplicaError msg | ReplicaMsg msg ->
+    | ReplicaError msg ->
         let msg_len = String.length msg in
         let buffer = Array1.create char c_layout (5 + msg_len) in
-        let msg_type = if msg = ReplicaError msg then replica_error_type else replica_msg_type in
-        Array1.set buffer 0 (Char.chr msg_type);
+        Array1.set buffer 0 (Char.chr replica_error_type);
         write_uint32 buffer 1 msg_len;
         write_string buffer 5 msg;
         buffer
         
-    | ReplicaHash { page_num; hash } ->
+    | ReplicaMsg msg ->
+        let msg_len = String.length msg in
+        let buffer = Array1.create char c_layout (5 + msg_len) in
+        Array1.set buffer 0 (Char.chr replica_msg_type);
+        write_uint32 buffer 1 msg_len;
+        write_string buffer 5 msg;
+        buffer
+        
+    | ReplicaHash { page_num = _; hash } ->
         let buffer = Array1.create char c_layout 21 in (* 1 + 20 for hash *)
         Array1.set buffer 0 (Char.chr replica_hash_type);
         (* Hash is fixed 20 bytes *)
