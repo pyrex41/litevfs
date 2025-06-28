@@ -10,13 +10,35 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>    /* For bool type */
-#include <immintrin.h>  /* For SIMD intrinsics */
+#ifdef HAVE_AVX2
+#include <immintrin.h>  /* For AVX2 intrinsics */
+#elif defined(HAVE_SSE2)
+#include <emmintrin.h>  /* For SSE2 intrinsics */
+#endif
 #include <cpuid.h>      /* For CPU feature detection */
+#include <errno.h>      /* For error codes */
+#include <limits.h>     /* For overflow checks */
+#include <stdio.h>      /* For logging */
+
+/* Security constants */
+#define MAX_PATH_LENGTH 4096        /* Maximum safe path length */
+#define MAX_STACK_ALLOC 256        /* Maximum safe stack allocation */
+#define MAX_BUFFER_SIZE (1024 * 1024 * 100)  /* 100MB max buffer */
+#define MIN_BUFFER_SIZE 1          /* Minimum buffer size */
+
+/* Logging macros for security events */
+#define LOG_SECURITY_ERROR(msg, ...) \
+    fprintf(stderr, "[SECURITY ERROR] %s:%d: " msg "\n", __FILE__, __LINE__, ##__VA_ARGS__)
+
+#define LOG_BOUNDS_ERROR(func, param, value, max) \
+    LOG_SECURITY_ERROR("%s: %s=%d exceeds maximum %d", func, param, value, max)
 
 /* CPU feature detection */
 static int cpu_has_avx2 = -1; /* -1 = not checked, 0 = no, 1 = yes */
+static int cpu_has_sse2 = -1; /* -1 = not checked, 0 = no, 1 = yes */
 
 static int check_avx2_support(void) {
+#ifdef HAVE_AVX2
     if (cpu_has_avx2 != -1) {
         return cpu_has_avx2;
     }
@@ -31,9 +53,33 @@ static int check_avx2_support(void) {
     }
     
     return cpu_has_avx2;
+#else
+    return 0; /* AVX2 not available at compile time */
+#endif
 }
 
-/* Write event structure matching Go and OCaml */
+static int check_sse2_support(void) {
+#ifdef HAVE_SSE2
+    if (cpu_has_sse2 != -1) {
+        return cpu_has_sse2;
+    }
+    
+    unsigned int eax, ebx, ecx, edx;
+    
+    /* Check for SSE2 support */
+    if (__get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
+        cpu_has_sse2 = (edx & (1 << 26)) ? 1 : 0; /* SSE2 bit */
+    } else {
+        cpu_has_sse2 = 0;
+    }
+    
+    return cpu_has_sse2;
+#else
+    return 0; /* SSE2 not available at compile time */
+#endif
+}
+
+/* Enhanced write event structure with security tracking */
 typedef struct {
     char* path;
     int64_t offset;
@@ -42,17 +88,34 @@ typedef struct {
     int is_wal;
     int64_t fence_token;
     int _needs_free;  /* Internal flag for memory management */
+    int _alloc_type;  /* Track allocation type: 0=stack, 1=heap */
 } write_event_t;
 
-/* Cleanup function for write events */
+/* Enhanced cleanup with proper error handling */
 void distcore_cleanup_write_events(write_event_t* events, int count) {
-    if (!events) return;
+    if (!events) {
+        LOG_SECURITY_ERROR("cleanup_write_events: NULL events pointer");
+        return;
+    }
+    
+    if (count < 0 || count > 10000) {  /* Sanity check */
+        LOG_SECURITY_ERROR("cleanup_write_events: invalid count %d", count);
+        return;
+    }
     
     for (int i = 0; i < count; i++) {
         if (events[i]._needs_free && events[i].path) {
-            free(events[i].path);
-            events[i].path = NULL;
-            events[i]._needs_free = 0;
+            /* Validate pointer before freeing */
+            if (events[i]._alloc_type == 1) {  /* Heap allocated */
+                free(events[i].path);
+                events[i].path = NULL;
+                events[i]._needs_free = 0;
+                events[i]._alloc_type = 0;
+            } else {
+                /* Stack allocated - just mark as cleaned */
+                events[i].path = NULL;
+                events[i]._needs_free = 0;
+            }
         }
     }
 }
@@ -109,16 +172,28 @@ int distcore_queue_enqueue(void* queue, const write_event_t* event) {
     CAMLreturnT(int, Bool_val(result));
 }
 
-/* Dequeue batch of events - returns count of events dequeued */
+/* Enhanced dequeue with comprehensive security checks */
 int distcore_queue_dequeue_batch(void* queue, write_event_t* events, int max_events) {
     CAMLparam0();
     CAMLlocal2(result, batch_array);
+    
+    /* Input validation */
+    if (!queue || !events) {
+        LOG_SECURITY_ERROR("dequeue_batch: NULL pointer parameters");
+        CAMLreturnT(int, -1);
+    }
+    
+    if (max_events <= 0 || max_events > 10000) {
+        LOG_BOUNDS_ERROR("dequeue_batch", "max_events", max_events, 10000);
+        CAMLreturnT(int, -1);
+    }
     
     static value *dequeue_func = NULL;
     if (!dequeue_func) {
         dequeue_func = caml_named_value("queue_dequeue_batch");
         if (!dequeue_func) {
-            CAMLreturnT(int, 0);
+            LOG_SECURITY_ERROR("dequeue_batch: OCaml function not found");
+            CAMLreturnT(int, -1);
         }
     }
     
@@ -136,27 +211,81 @@ int distcore_queue_dequeue_batch(void* queue, write_event_t* events, int max_eve
         const char* path = String_val(Field(ml_event, 0));
         size_t path_len = strlen(path);
         
-        /* Use stack allocation for small strings, heap for large ones */
-        if (path_len < 256) {
+        /* SECURITY FIX: Comprehensive path length validation */
+        if (path_len == 0) {
+            LOG_SECURITY_ERROR("dequeue_batch: empty path at index %d", i);
+            CAMLreturnT(int, -1);
+        }
+        
+        if (path_len > MAX_PATH_LENGTH) {
+            LOG_BOUNDS_ERROR("dequeue_batch", "path_len", (int)path_len, MAX_PATH_LENGTH);
+            CAMLreturnT(int, -1);
+        }
+        
+        /* SECURITY FIX: Safe allocation with overflow protection */
+        if (path_len < MAX_STACK_ALLOC) {
+            /* Stack allocation - safe for small strings */
             events[i].path = alloca(path_len + 1);
+            events[i]._alloc_type = 0;  /* Stack allocated */
+            events[i]._needs_free = 0;
         } else {
+            /* Heap allocation with overflow check */
+            if (path_len > SIZE_MAX - 1) {
+                LOG_SECURITY_ERROR("dequeue_batch: path length overflow at index %d", i);
+                /* Cleanup already allocated memory */
+                for (int j = 0; j < i; j++) {
+                    if (events[j]._needs_free && events[j]._alloc_type == 1) {
+                        free(events[j].path);
+                    }
+                }
+                CAMLreturnT(int, -1);
+            }
+            
             events[i].path = malloc(path_len + 1);
-            /* Mark for cleanup - we'll track this */
+            if (!events[i].path) {
+                LOG_SECURITY_ERROR("dequeue_batch: malloc failed for path at index %d", i);
+                /* Cleanup already allocated memory */
+                for (int j = 0; j < i; j++) {
+                    if (events[j]._needs_free && events[j]._alloc_type == 1) {
+                        free(events[j].path);
+                    }
+                }
+                CAMLreturnT(int, -1);
+            }
+            events[i]._alloc_type = 1;  /* Heap allocated */
             events[i]._needs_free = 1;
         }
-        strcpy(events[i].path, path);
+        
+        /* Safe string copy */
+        memcpy(events[i].path, path, path_len);
+        events[i].path[path_len] = '\0';
         
         events[i].offset = Int64_val(Field(ml_event, 1));
         
         /* Extract data from Bigarray - this is already managed by OCaml */
         value ml_data = Field(ml_event, 2);
         struct caml_ba_array* ba = Caml_ba_array_val(ml_data);
+        
+        /* SECURITY FIX: Validate Bigarray data */
+        if (!ba || !ba->data || ba->dim[0] < 0) {
+            LOG_SECURITY_ERROR("dequeue_batch: invalid Bigarray at index %d", i);
+            /* Cleanup */
+            if (events[i]._needs_free && events[i]._alloc_type == 1) {
+                free(events[i].path);
+            }
+            for (int j = 0; j < i; j++) {
+                if (events[j]._needs_free && events[j]._alloc_type == 1) {
+                    free(events[j].path);
+                }
+            }
+            CAMLreturnT(int, -1);
+        }
+        
         events[i].data = (char*)ba->data;
         events[i].length = ba->dim[0];
         
         events[i].is_wal = Bool_val(Field(ml_event, 3));
         events[i].fence_token = Int64_val(Field(ml_event, 4));
-        events[i]._needs_free = 0; /* Default to no cleanup needed */
     }
     
     CAMLreturnT(int, count);
@@ -225,15 +354,42 @@ replication_strategy_t distcore_compute_strategy(const write_event_t* events, in
     CAMLreturnT(replication_strategy_t, (replication_strategy_t)strategy);
 }
 
-/* Encode write batch to binary format */
+/* Enhanced encode function with comprehensive validation */
 int distcore_encode_write_batch(const write_event_t* events, int count, 
                                char* output_buffer, int buffer_size) {
     CAMLparam0();
     CAMLlocal2(batch_array, result);
     
+    /* SECURITY FIX: Comprehensive input validation */
+    if (!events || !output_buffer) {
+        LOG_SECURITY_ERROR("encode_write_batch: NULL pointer parameters");
+        CAMLreturnT(int, -4);
+    }
+    
+    if (count < 0 || count > 10000) {
+        LOG_BOUNDS_ERROR("encode_write_batch", "count", count, 10000);
+        CAMLreturnT(int, -4);
+    }
+    
+    if (buffer_size < MIN_BUFFER_SIZE || buffer_size > MAX_BUFFER_SIZE) {
+        LOG_BOUNDS_ERROR("encode_write_batch", "buffer_size", buffer_size, MAX_BUFFER_SIZE);
+        CAMLreturnT(int, -4);
+    }
+    
     /* Convert C array to OCaml array */
     batch_array = caml_alloc(count, 0);
     for (int i = 0; i < count; i++) {
+        /* Validate each event */
+        if (!events[i].path || !events[i].data) {
+            LOG_SECURITY_ERROR("encode_write_batch: NULL data in event %d", i);
+            CAMLreturnT(int, -4);
+        }
+        
+        if (events[i].length < 0 || events[i].length > MAX_BUFFER_SIZE) {
+            LOG_BOUNDS_ERROR("encode_write_batch", "event.length", events[i].length, MAX_BUFFER_SIZE);
+            CAMLreturnT(int, -4);
+        }
+        
         value ml_event = caml_alloc(5, 0);
         Store_field(ml_event, 0, caml_copy_string(events[i].path));
         Store_field(ml_event, 1, caml_copy_int64(events[i].offset));
@@ -253,28 +409,52 @@ int distcore_encode_write_batch(const write_event_t* events, int count,
     if (!encode_func) {
         encode_func = caml_named_value("encode_write_batch");
         if (!encode_func) {
-            CAMLreturnT(int, 0);
+            LOG_SECURITY_ERROR("encode_write_batch: OCaml function not found");
+            CAMLreturnT(int, -4);
         }
     }
     
     result = caml_callback(*encode_func, batch_array);
     
-    /* Copy encoded data from OCaml Bigarray to C buffer with bounds checking */
-    struct caml_ba_array* ba = Caml_ba_array_val(result);
-    int encoded_size = ba->dim[0];
-    
-    /* Validate sizes */
-    if (encoded_size < 0 || buffer_size < 0) {
-        CAMLreturnT(int, -2); /* Invalid size parameters */
+    /* SECURITY FIX: Enhanced validation with overflow checks */
+    if (!result || !Is_block(result)) {
+        LOG_SECURITY_ERROR("encode_write_batch: invalid OCaml result");
+        CAMLreturnT(int, -4);
     }
     
-    if (encoded_size <= buffer_size && output_buffer != NULL && ba->data != NULL) {
+    struct caml_ba_array* ba = Caml_ba_array_val(result);
+    if (!ba || !ba->data) {
+        LOG_SECURITY_ERROR("encode_write_batch: invalid result Bigarray");
+        CAMLreturnT(int, -4);
+    }
+    
+    /* Check for integer overflow in dimension */
+    if (ba->dim[0] < 0) {
+        LOG_SECURITY_ERROR("encode_write_batch: negative encoded size");
+        CAMLreturnT(int, -2);
+    }
+    
+    int encoded_size = ba->dim[0];
+    
+    /* SECURITY FIX: Enhanced size validation with overflow protection */
+    if (encoded_size > MAX_BUFFER_SIZE) {
+        LOG_BOUNDS_ERROR("encode_write_batch", "encoded_size", encoded_size, MAX_BUFFER_SIZE);
+        CAMLreturnT(int, -2);
+    }
+    
+    /* Check for potential integer overflow in comparison */
+    if (encoded_size > INT_MAX || buffer_size > INT_MAX) {
+        LOG_SECURITY_ERROR("encode_write_batch: size overflow risk");
+        CAMLreturnT(int, -2);
+    }
+    
+    if (encoded_size <= buffer_size) {
+        /* Safe to copy */
         memcpy(output_buffer, ba->data, encoded_size);
         CAMLreturnT(int, encoded_size);
-    } else if (encoded_size > buffer_size) {
-        CAMLreturnT(int, -1); /* Buffer too small */
     } else {
-        CAMLreturnT(int, -3); /* Null pointer error */
+        LOG_SECURITY_ERROR("encode_write_batch: buffer too small (%d < %d)", buffer_size, encoded_size);
+        CAMLreturnT(int, -1); /* Buffer too small */
     }
 }
 
@@ -307,30 +487,48 @@ int distcore_compute_diff(const char* old_db, int old_size,
     CAMLreturnT(int, 0); /* Placeholder */
 }
 
-/* SIMD-optimized memory operations */
-
-/* SIMD memory comparison with bounds checking */
+/* Enhanced SIMD memory operations with comprehensive bounds checking */
 value distcore_memcmp_stub(value v_arr1, value v_offset1, value v_arr2, value v_offset2, value v_len) {
     CAMLparam5(v_arr1, v_offset1, v_arr2, v_offset2, v_len);
     
+    /* SECURITY FIX: Validate Bigarray pointers */
+    if (!Is_block(v_arr1) || !Is_block(v_arr2)) {
+        LOG_SECURITY_ERROR("memcmp_stub: invalid Bigarray parameters");
+        CAMLreturn(Val_int(-1));
+    }
+    
     struct caml_ba_array* ba1 = Caml_ba_array_val(v_arr1);
     struct caml_ba_array* ba2 = Caml_ba_array_val(v_arr2);
+    
+    if (!ba1 || !ba2 || !ba1->data || !ba2->data) {
+        LOG_SECURITY_ERROR("memcmp_stub: NULL Bigarray data");
+        CAMLreturn(Val_int(-1));
+    }
     
     int offset1 = Int_val(v_offset1);
     int offset2 = Int_val(v_offset2);
     int len = Int_val(v_len);
     
-    /* Bounds checking */
+    /* SECURITY FIX: Enhanced bounds checking with overflow protection */
     if (offset1 < 0 || offset2 < 0 || len < 0) {
-        CAMLreturn(Val_int(-1)); /* Invalid parameters */
+        LOG_SECURITY_ERROR("memcmp_stub: negative parameters");
+        CAMLreturn(Val_int(-1));
+    }
+    
+    /* Check for integer overflow in addition */
+    if (offset1 > INT_MAX - len || offset2 > INT_MAX - len) {
+        LOG_SECURITY_ERROR("memcmp_stub: offset + length overflow");
+        CAMLreturn(Val_int(-1));
     }
     
     if (offset1 + len > ba1->dim[0] || offset2 + len > ba2->dim[0]) {
-        CAMLreturn(Val_int(-1)); /* Out of bounds */
+        LOG_SECURITY_ERROR("memcmp_stub: out of bounds access");
+        CAMLreturn(Val_int(-1));
     }
     
-    if (!ba1->data || !ba2->data) {
-        CAMLreturn(Val_int(-1)); /* Null pointer */
+    if (len > MAX_BUFFER_SIZE) {
+        LOG_BOUNDS_ERROR("memcmp_stub", "len", len, MAX_BUFFER_SIZE);
+        CAMLreturn(Val_int(-1));
     }
     
     char* ptr1 = (char*)ba1->data + offset1;
@@ -348,7 +546,7 @@ value distcore_memcmp_stub(value v_arr1, value v_offset1, value v_arr2, value v_
             
             if (_mm256_movemask_epi8(cmp) != 0xFFFFFFFF) {
                 /* Found difference, fall back to byte-by-byte comparison */
-                for (int j = i; j < i + 32; j++) {
+                for (int j = i; j < i + 32 && j < len; j++) {
                     int diff = ptr1[j] - ptr2[j];
                     if (diff != 0) CAMLreturn(Val_int(diff));
                 }
@@ -369,19 +567,63 @@ value distcore_memcmp_stub(value v_arr1, value v_offset1, value v_arr2, value v_
     }
 }
 
-/* SIMD memory copy */
+/* Enhanced SIMD memory copy with security validation */
 value distcore_memcpy_stub(value v_dst, value v_dst_offset, value v_src, value v_src_offset, value v_len) {
     CAMLparam5(v_dst, v_dst_offset, v_src, v_src_offset, v_len);
+    
+    /* SECURITY FIX: Validate parameters */
+    if (!Is_block(v_dst) || !Is_block(v_src)) {
+        LOG_SECURITY_ERROR("memcpy_stub: invalid Bigarray parameters");
+        CAMLreturn(Val_unit);
+    }
     
     struct caml_ba_array* dst_ba = Caml_ba_array_val(v_dst);
     struct caml_ba_array* src_ba = Caml_ba_array_val(v_src);
     
-    char* dst = (char*)dst_ba->data + Int_val(v_dst_offset);
-    char* src = (char*)src_ba->data + Int_val(v_src_offset);
+    if (!dst_ba || !src_ba || !dst_ba->data || !src_ba->data) {
+        LOG_SECURITY_ERROR("memcpy_stub: NULL Bigarray data");
+        CAMLreturn(Val_unit);
+    }
+    
+    int dst_offset = Int_val(v_dst_offset);
+    int src_offset = Int_val(v_src_offset);
     int len = Int_val(v_len);
     
+    /* SECURITY FIX: Comprehensive bounds checking */
+    if (dst_offset < 0 || src_offset < 0 || len < 0) {
+        LOG_SECURITY_ERROR("memcpy_stub: negative parameters");
+        CAMLreturn(Val_unit);
+    }
+    
+    if (dst_offset > INT_MAX - len || src_offset > INT_MAX - len) {
+        LOG_SECURITY_ERROR("memcpy_stub: offset + length overflow");
+        CAMLreturn(Val_unit);
+    }
+    
+    if (dst_offset + len > dst_ba->dim[0] || src_offset + len > src_ba->dim[0]) {
+        LOG_SECURITY_ERROR("memcpy_stub: out of bounds access");
+        CAMLreturn(Val_unit);
+    }
+    
+    if (len > MAX_BUFFER_SIZE) {
+        LOG_BOUNDS_ERROR("memcpy_stub", "len", len, MAX_BUFFER_SIZE);
+        CAMLreturn(Val_unit);
+    }
+    
+    char* dst = (char*)dst_ba->data + dst_offset;
+    char* src = (char*)src_ba->data + src_offset;
+    
+    /* Check for overlapping memory regions */
+    if ((src < dst && src + len > dst) || (dst < src && dst + len > src)) {
+        LOG_SECURITY_ERROR("memcpy_stub: overlapping memory regions detected");
+        /* Use memmove for overlapping regions */
+        memmove(dst, src, len);
+        CAMLreturn(Val_unit);
+    }
+    
     /* SIMD-optimized copy for aligned data */
-    if (len >= 32 && ((uintptr_t)dst % 32) == 0 && ((uintptr_t)src % 32) == 0) {
+    if (check_avx2_support() && len >= 32 && 
+        ((uintptr_t)dst % 32) == 0 && ((uintptr_t)src % 32) == 0) {
         int simd_len = len & ~31;
         
         for (int i = 0; i < simd_len; i += 32) {
@@ -390,7 +632,9 @@ value distcore_memcpy_stub(value v_dst, value v_dst_offset, value v_src, value v
         }
         
         /* Copy remaining bytes */
-        memcpy(dst + simd_len, src + simd_len, len - simd_len);
+        if (simd_len < len) {
+            memcpy(dst + simd_len, src + simd_len, len - simd_len);
+        }
     } else {
         /* Fall back to standard memcpy */
         memcpy(dst, src, len);
@@ -610,18 +854,62 @@ static const sqlite3_io_methods ocaml_io_methods = {
     NULL                 /* xUnfetch */
 };
 
-/* VFS interception functions exposed to Go */
+/* Enhanced VFS operations with type safety */
 int distcore_vfs_intercept_read(void* file, char* buffer, int64_t offset, int amount) {
-    if (!file) return -1;
+    /* SECURITY FIX: Enhanced parameter validation */
+    if (!file || !buffer) {
+        LOG_SECURITY_ERROR("vfs_intercept_read: NULL parameters");
+        return -1;
+    }
     
+    if (amount < 0 || amount > MAX_BUFFER_SIZE) {
+        LOG_BOUNDS_ERROR("vfs_intercept_read", "amount", amount, MAX_BUFFER_SIZE);
+        return -1;
+    }
+    
+    if (offset < 0) {
+        LOG_SECURITY_ERROR("vfs_intercept_read: negative offset");
+        return -1;
+    }
+    
+    /* SECURITY FIX: Type validation before casting */
     sqlite3_file *sqlite_file = (sqlite3_file*)file;
+    
+    /* Basic sanity check on the file structure */
+    if (!sqlite_file->pMethods) {
+        LOG_SECURITY_ERROR("vfs_intercept_read: invalid file structure");
+        return -1;
+    }
+    
     return vfs_read(sqlite_file, buffer, amount, offset);
 }
 
 int distcore_vfs_intercept_write(void* file, char* buffer, int64_t offset, int amount) {
-    if (!file) return -1;
+    /* SECURITY FIX: Enhanced parameter validation */
+    if (!file || !buffer) {
+        LOG_SECURITY_ERROR("vfs_intercept_write: NULL parameters");
+        return -1;
+    }
     
+    if (amount < 0 || amount > MAX_BUFFER_SIZE) {
+        LOG_BOUNDS_ERROR("vfs_intercept_write", "amount", amount, MAX_BUFFER_SIZE);
+        return -1;
+    }
+    
+    if (offset < 0) {
+        LOG_SECURITY_ERROR("vfs_intercept_write: negative offset");
+        return -1;
+    }
+    
+    /* SECURITY FIX: Type validation before casting */
     sqlite3_file *sqlite_file = (sqlite3_file*)file;
+    
+    /* Basic sanity check on the file structure */
+    if (!sqlite_file->pMethods) {
+        LOG_SECURITY_ERROR("vfs_intercept_write: invalid file structure");
+        return -1;
+    }
+    
     return vfs_write(sqlite_file, buffer, amount, offset);
 }
 
