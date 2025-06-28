@@ -534,37 +534,9 @@ value distcore_memcmp_stub(value v_arr1, value v_offset1, value v_arr2, value v_
     char* ptr1 = (char*)ba1->data + offset1;
     char* ptr2 = (char*)ba2->data + offset2;
     
-    /* SIMD-optimized comparison for aligned data - check CPU support first */
-    if (check_avx2_support() && len >= 32 && 
-        ((uintptr_t)ptr1 % 32) == 0 && ((uintptr_t)ptr2 % 32) == 0) {
-        int simd_len = len & ~31; /* Round down to multiple of 32 */
-        
-        for (int i = 0; i < simd_len; i += 32) {
-            __m256i a = _mm256_load_si256((__m256i*)(ptr1 + i));
-            __m256i b = _mm256_load_si256((__m256i*)(ptr2 + i));
-            __m256i cmp = _mm256_cmpeq_epi8(a, b);
-            
-            if (_mm256_movemask_epi8(cmp) != 0xFFFFFFFF) {
-                /* Found difference, fall back to byte-by-byte comparison */
-                for (int j = i; j < i + 32 && j < len; j++) {
-                    int diff = ptr1[j] - ptr2[j];
-                    if (diff != 0) CAMLreturn(Val_int(diff));
-                }
-            }
-        }
-        
-        /* Compare remaining bytes */
-        for (int i = simd_len; i < len; i++) {
-            int diff = ptr1[i] - ptr2[i];
-            if (diff != 0) CAMLreturn(Val_int(diff));
-        }
-        
-        CAMLreturn(Val_int(0));
-    } else {
-        /* Fall back to standard memcmp */
-        int result = memcmp(ptr1, ptr2, len);
-        CAMLreturn(Val_int(result));
-    }
+    /* Fall back to standard memcmp - SIMD disabled for now */
+    int result = memcmp(ptr1, ptr2, len);
+    CAMLreturn(Val_int(result));
 }
 
 /* Enhanced SIMD memory copy with security validation */
@@ -621,24 +593,8 @@ value distcore_memcpy_stub(value v_dst, value v_dst_offset, value v_src, value v
         CAMLreturn(Val_unit);
     }
     
-    /* SIMD-optimized copy for aligned data */
-    if (check_avx2_support() && len >= 32 && 
-        ((uintptr_t)dst % 32) == 0 && ((uintptr_t)src % 32) == 0) {
-        int simd_len = len & ~31;
-        
-        for (int i = 0; i < simd_len; i += 32) {
-            __m256i data = _mm256_load_si256((__m256i*)(src + i));
-            _mm256_store_si256((__m256i*)(dst + i), data);
-        }
-        
-        /* Copy remaining bytes */
-        if (simd_len < len) {
-            memcpy(dst + simd_len, src + simd_len, len - simd_len);
-        }
-    } else {
-        /* Fall back to standard memcpy */
-        memcpy(dst, src, len);
-    }
+    /* Fall back to standard memcpy - SIMD disabled for now */
+    memcpy(dst, src, len);
     
     CAMLreturn(Val_unit);
 }
@@ -653,46 +609,9 @@ value distcore_hash_simd_stub(value v_data, value v_offset, value v_len) {
     
     uint32_t hash = 0x9e3779b9U;
     
-    /* SIMD hash computation for aligned data */
-    if (len >= 32 && ((uintptr_t)data % 32) == 0) {
-        __m256i hash_vec = _mm256_set1_epi32(hash);
-        __m256i multiplier = _mm256_set1_epi32(0x9e3779b9U);
-        
-        int simd_len = len & ~31;
-        for (int i = 0; i < simd_len; i += 32) {
-            __m256i chunk = _mm256_load_si256((__m256i*)(data + i));
-            
-            /* Convert bytes to 32-bit integers and accumulate hash */
-            __m256i lo = _mm256_unpacklo_epi8(chunk, _mm256_setzero_si256());
-            __m256i hi = _mm256_unpackhi_epi8(chunk, _mm256_setzero_si256());
-            
-            lo = _mm256_unpacklo_epi16(lo, _mm256_setzero_si256());
-            hi = _mm256_unpacklo_epi16(hi, _mm256_setzero_si256());
-            
-            hash_vec = _mm256_mullo_epi32(hash_vec, multiplier);
-            hash_vec = _mm256_add_epi32(hash_vec, lo);
-            hash_vec = _mm256_mullo_epi32(hash_vec, multiplier);
-            hash_vec = _mm256_add_epi32(hash_vec, hi);
-        }
-        
-        /* Reduce hash vector to single value */
-        uint32_t hash_array[8];
-        _mm256_storeu_si256((__m256i*)hash_array, hash_vec);
-        
-        hash = hash_array[0];
-        for (int i = 1; i < 8; i++) {
-            hash ^= hash_array[i];
-        }
-        
-        /* Process remaining bytes */
-        for (int i = simd_len; i < len; i++) {
-            hash = hash * 0x9e3779b9U + (unsigned char)data[i];
-        }
-    } else {
-        /* Fall back to scalar hash */
-        for (int i = 0; i < len; i++) {
-            hash = hash * 0x9e3779b9U + (unsigned char)data[i];
-        }
+    /* Use scalar hash - SIMD disabled for now */
+    for (int i = 0; i < len; i++) {
+        hash = hash * 0x9e3779b9U + (unsigned char)data[i];
     }
     
     CAMLreturn(caml_copy_int32(hash));

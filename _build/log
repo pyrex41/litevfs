@@ -13,48 +13,19 @@
 #  ; build_dir = In_build_dir "default"
 #  ; instrument_with = []
 #  }
-$ /usr/bin/ocamlc.opt -config > /tmp/dune_a5369b_output
-$ (cd _build/default && /usr/bin/ocamlc.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -w -49 -nopervasives -nostdlib -g -bin-annot -bin-annot-occurrences -I src/.distcore.objs/byte -no-alias-deps -opaque -o src/.distcore.objs/byte/distcore__.cmo -c -impl src/distcore__.ml-gen)
-$ (cd _build/default && /usr/bin/ocamldep.opt -modules -impl src/distcore.ml) > _build/default/src/.distcore.objs/distcore.impl.d
-$ (cd _build/default && /usr/bin/ocamldep.opt -modules -impl src/build_config.ml) > _build/default/src/.distcore.objs/distcore__Build_config.impl.d
-$ (cd _build/default && /usr/bin/ocamldep.opt -modules -impl src/binary_diff.ml) > _build/default/src/.distcore.objs/distcore__Binary_diff.impl.d
-$ (cd _build/default && /usr/bin/ocamldep.opt -modules -impl src/replication.ml) > _build/default/src/.distcore.objs/distcore__Replication.impl.d
-$ (cd _build/default && /usr/bin/ocamldep.opt -modules -impl src/lease_state_machine.ml) > _build/default/src/.distcore.objs/distcore__Lease_state_machine.impl.d
-$ (cd _build/default && /usr/bin/ocamldep.opt -modules -impl src/protocol_constants.ml) > _build/default/src/.distcore.objs/distcore__Protocol_constants.impl.d
-$ (cd _build/default && /usr/bin/ocamldep.opt -modules -impl src/lock_free_queue.ml) > _build/default/src/.distcore.objs/distcore__Lock_free_queue.impl.d
-$ (cd _build/default && /usr/bin/ocamlopt.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -w -49 -nopervasives -nostdlib -g -I src/.distcore.objs/byte -I src/.distcore.objs/native -intf-suffix .ml-gen -no-alias-deps -opaque -o src/.distcore.objs/native/distcore__.cmx -c -impl src/distcore__.ml-gen)
-$ (cd _build/default && /usr/bin/ocamlc.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -bin-annot -bin-annot-occurrences -I src/.distcore.objs/byte -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/threads -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/unix -no-alias-deps -opaque -open Distcore__ -o src/.distcore.objs/byte/distcore__Protocol_constants.cmo -c -impl src/protocol_constants.ml)
-$ (cd _build/default && /usr/bin/ocamlc.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -bin-annot -bin-annot-occurrences -I src/.distcore.objs/byte -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/threads -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/unix -no-alias-deps -opaque -open Distcore__ -o src/.distcore.objs/byte/distcore__Build_config.cmo -c -impl src/build_config.ml)
-$ (cd _build/default && /usr/bin/ocamlc.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -bin-annot -bin-annot-occurrences -I src/.distcore.objs/byte -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/threads -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/unix -no-alias-deps -opaque -open Distcore__ -o src/.distcore.objs/byte/distcore__Lock_free_queue.cmo -c -impl src/lock_free_queue.ml)
-$ (cd _build/default && /usr/bin/ocamlopt.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -I src/.distcore.objs/byte -I src/.distcore.objs/native -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/threads -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/unix -intf-suffix .ml -no-alias-deps -opaque -open Distcore__ -o src/.distcore.objs/native/distcore__Protocol_constants.cmx -c -impl src/protocol_constants.ml)
-$ (cd _build/default && /usr/bin/ocamlc.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -bin-annot -bin-annot-occurrences -I src/.distcore.objs/byte -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/threads -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/unix -no-alias-deps -opaque -open Distcore__ -o src/.distcore.objs/byte/distcore__Lease_state_machine.cmo -c -impl src/lease_state_machine.ml)
-$ (cd _build/default && /usr/bin/ocamlopt.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -I src/.distcore.objs/byte -I src/.distcore.objs/native -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/threads -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/unix -intf-suffix .ml -no-alias-deps -opaque -open Distcore__ -o src/.distcore.objs/native/distcore__Build_config.cmx -c -impl src/build_config.ml)
-$ (cd _build/default && /usr/bin/ocamlc.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -bin-annot -bin-annot-occurrences -I src/.distcore.objs/byte -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/threads -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/unix -no-alias-deps -opaque -open Distcore__ -o src/.distcore.objs/byte/distcore__Binary_diff.cmo -c -impl src/binary_diff.ml)
-$ (cd _build/default && /usr/bin/ocamlopt.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -I src/.distcore.objs/byte -I src/.distcore.objs/native -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/threads -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/unix -intf-suffix .ml -no-alias-deps -opaque -open Distcore__ -o src/.distcore.objs/native/distcore__Lock_free_queue.cmx -c -impl src/lock_free_queue.ml)
-$ (cd _build/default && /usr/bin/ocamlopt.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -I src/.distcore.objs/byte -I src/.distcore.objs/native -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/threads -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/unix -intf-suffix .ml -no-alias-deps -opaque -open Distcore__ -o src/.distcore.objs/native/distcore__Lease_state_machine.cmx -c -impl src/lease_state_machine.ml)
-$ (cd _build/default && /usr/bin/ocamlc.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -bin-annot -bin-annot-occurrences -I src/.distcore.objs/byte -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/threads -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/unix -no-alias-deps -opaque -open Distcore__ -o src/.distcore.objs/byte/distcore__Replication.cmo -c -impl src/replication.ml)
-$ (cd _build/default && /usr/bin/ocamlopt.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -I src/.distcore.objs/byte -I src/.distcore.objs/native -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/threads -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/unix -intf-suffix .ml -no-alias-deps -opaque -open Distcore__ -o src/.distcore.objs/native/distcore__Binary_diff.cmx -c -impl src/binary_diff.ml)
-$ (cd _build/default && /usr/bin/ocamlc.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -bin-annot -bin-annot-occurrences -I src/.distcore.objs/byte -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/threads -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/unix -no-alias-deps -opaque -open Distcore__ -o src/.distcore.objs/byte/distcore.cmo -c -impl src/distcore.ml)
-$ (cd _build/default && /usr/bin/ocamlc.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -a -o src/distcore.cma src/.distcore.objs/byte/distcore__.cmo src/.distcore.objs/byte/distcore__Binary_diff.cmo src/.distcore.objs/byte/distcore__Protocol_constants.cmo src/.distcore.objs/byte/distcore__Replication.cmo src/.distcore.objs/byte/distcore__Lock_free_queue.cmo src/.distcore.objs/byte/distcore__Lease_state_machine.cmo src/.distcore.objs/byte/distcore.cmo src/.distcore.objs/byte/distcore__Build_config.cmo)
-$ (cd _build/default && /usr/bin/ocamlopt.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -I src/.distcore.objs/byte -I src/.distcore.objs/native -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/threads -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/unix -intf-suffix .ml -no-alias-deps -opaque -open Distcore__ -o src/.distcore.objs/native/distcore__Replication.cmx -c -impl src/replication.ml)
-$ (cd _build/default && /usr/bin/ocamlopt.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -I src/.distcore.objs/byte -I src/.distcore.objs/native -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/threads -I /usr/lib/x86_64-linux-gnu/ocaml/5.3.0/unix -intf-suffix .ml -no-alias-deps -opaque -open Distcore__ -o src/.distcore.objs/native/distcore.cmx -c -impl src/distcore.ml)
-$ (cd _build/default && /usr/bin/ocamlopt.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -a -o src/distcore.cmxa src/.distcore.objs/native/distcore__.cmx src/.distcore.objs/native/distcore__Binary_diff.cmx src/.distcore.objs/native/distcore__Protocol_constants.cmx src/.distcore.objs/native/distcore__Replication.cmx src/.distcore.objs/native/distcore__Lock_free_queue.cmx src/.distcore.objs/native/distcore__Lease_state_machine.cmx src/.distcore.objs/native/distcore.cmx src/.distcore.objs/native/distcore__Build_config.cmx)
-$ (cd _build/default && /usr/bin/ocamlopt.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -shared -linkall -I src -o src/distcore.cmxs src/distcore.cmxa)
+$ /usr/bin/ocamlc.opt -config > /tmp/dune_f30160_output
 $ (cd _build/default/src && /usr/bin/bash -e -u -o pipefail -c '
-    # Detect CPU features and set appropriate flags
-    if grep -q avx2 /proc/cpuinfo 2>/dev/null; then
-      SIMD_FLAGS='\''-mavx2 -DHAVE_AVX2'\''
-    elif grep -q sse2 /proc/cpuinfo 2>/dev/null; then
-      SIMD_FLAGS='\''-msse2 -DHAVE_SSE2'\''
-    else
-      SIMD_FLAGS='\''-DNO_SIMD'\''
-    fi
+    # Set up opam environment
+    eval $(opam env)
     
-    # Get OCaml runtime library paths
-    OCAML_LIB='\''/usr/lib/x86_64-linux-gnu/ocaml/5.3.0'\''
+    # Get OCaml paths from opam environment
+    OCAML_LIB=$(ocamlopt -config | grep standard_library: | cut -d'\'' '\'' -f2)
     
-    # Build shared library with OCaml runtime
-    gcc -shared -fPIC -O3 $SIMD_FLAGS -DCAML_NAME_SPACE -o libdistcore.so distcore_stubs.c -I $OCAML_LIB -L $OCAML_LIB -lcamlrun_shared -lsqlite3 -lm -ldl -lpthread
+    # Compile C stubs first
+    gcc -fPIC -O3 -DCAML_NAME_SPACE -DNO_SIMD -c distcore_stubs.c -I $OCAML_LIB
+    
+    # Create shared library manually with all OCaml objects
+    gcc -shared -fPIC -o libdistcore.so distcore_stubs.o .distcore.objs/native/distcore.o .distcore.objs/native/distcore__*.o -L $OCAML_LIB -lasmrun_shared -lsqlite3 -lm -ldl -lpthread
   ')
 > distcore_stubs.c: In function ‘distcore_queue_create’:
 > distcore_stubs.c:136:21: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
@@ -85,22 +56,22 @@ $ (cd _build/default/src && /usr/bin/bash -e -u -o pipefail -c '
 >   477 |         diff_func = caml_named_value("compute_diff");
 >       |                   ^
 > distcore_stubs.c: In function ‘distcore_create_page_tracker’:
-> distcore_stubs.c:720:21: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
->   720 |         create_func = caml_named_value("create_page_tracker");
+> distcore_stubs.c:639:21: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+>   639 |         create_func = caml_named_value("create_page_tracker");
 >       |                     ^
 > distcore_stubs.c: In function ‘vfs_read’:
-> distcore_stubs.c:754:23: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
->   754 |             read_func = caml_named_value("vfs_intercept_read");
+> distcore_stubs.c:673:23: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+>   673 |             read_func = caml_named_value("vfs_intercept_read");
 >       |                       ^
 > distcore_stubs.c: In function ‘vfs_write’:
-> distcore_stubs.c:797:24: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
->   797 |             write_func = caml_named_value("vfs_intercept_write");
+> distcore_stubs.c:716:24: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+>   716 |             write_func = caml_named_value("vfs_intercept_write");
 >       |                        ^
 > distcore_stubs.c: In function ‘distcore_get_sync_pages’:
-> distcore_stubs.c:928:25: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
->   928 |         sync_pages_func = caml_named_value("get_sync_pages");
+> distcore_stubs.c:847:25: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+>   847 |         sync_pages_func = caml_named_value("get_sync_pages");
 >       |                         ^
 > distcore_stubs.c: In function ‘distcore_compute_diff_pages’:
-> distcore_stubs.c:1023:19: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
->  1023 |         diff_func = caml_named_value("compute_diff_pages");
+> distcore_stubs.c:942:19: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+>   942 |         diff_func = caml_named_value("compute_diff_pages");
 >       |                   ^

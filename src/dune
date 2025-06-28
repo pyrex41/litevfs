@@ -9,23 +9,20 @@
  (deps distcore_stubs.c distcore.cma distcore.cmxa)
  (action
   (bash "
-    # Detect CPU features and set appropriate flags
-    if grep -q avx2 /proc/cpuinfo 2>/dev/null; then
-      SIMD_FLAGS='-mavx2 -DHAVE_AVX2'
-    elif grep -q sse2 /proc/cpuinfo 2>/dev/null; then
-      SIMD_FLAGS='-msse2 -DHAVE_SSE2'
-    else
-      SIMD_FLAGS='-DNO_SIMD'
-    fi
+    # Set up opam environment
+    eval $(opam env)
     
-    # Get OCaml runtime library paths
-    OCAML_LIB='/usr/lib/x86_64-linux-gnu/ocaml/5.3.0'
+    # Get OCaml paths from opam environment
+    OCAML_LIB=$(ocamlopt -config | grep standard_library: | cut -d' ' -f2)
     
-    # Build shared library with OCaml runtime
-    gcc -shared -fPIC -O3 $SIMD_FLAGS -DCAML_NAME_SPACE -o libdistcore.so \
-        distcore_stubs.c \
-        -I $OCAML_LIB \
-        -L $OCAML_LIB \
-        -lcamlrun_shared \
+    # Compile C stubs first
+    gcc -fPIC -O3 -DCAML_NAME_SPACE -DNO_SIMD -c distcore_stubs.c -I $OCAML_LIB
+    
+    # Create shared library manually with all OCaml objects
+    gcc -shared -fPIC -o libdistcore.so \
+        distcore_stubs.o \
+        .distcore.objs/native/distcore.o \
+        .distcore.objs/native/distcore__*.o \
+        -L $OCAML_LIB -lasmrun_shared \
         -lsqlite3 -lm -ldl -lpthread
   ")))
