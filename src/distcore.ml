@@ -124,22 +124,22 @@ module PerfMonitor = struct
     state_transitions: int64;
   }
   
-  (* Thread-safe atomic counters *)
-  let atomic_queue_enqueues = Atomic.make 0L
-  let atomic_queue_dequeues = Atomic.make 0L
-  let atomic_bytes_processed = Atomic.make 0L
-  let atomic_diff_operations = Atomic.make 0L
-  let atomic_replication_operations = Atomic.make 0L
-  let atomic_state_transitions = Atomic.make 0L
+  (* Thread-safe atomic counters using int *)
+  let atomic_queue_enqueues = Atomic.make 0
+  let atomic_queue_dequeues = Atomic.make 0
+  let atomic_bytes_processed = Atomic.make 0
+  let atomic_diff_operations = Atomic.make 0
+  let atomic_replication_operations = Atomic.make 0
+  let atomic_state_transitions = Atomic.make 0
   
   let record_queue_enqueue () =
     Atomic.incr atomic_queue_enqueues
   
   let record_queue_dequeue count =
-    Atomic.fetch_and_add atomic_queue_dequeues (Int64.of_int count) |> ignore
+    Atomic.fetch_and_add atomic_queue_dequeues count |> ignore
   
   let record_bytes_processed bytes =
-    Atomic.fetch_and_add atomic_bytes_processed (Int64.of_int bytes) |> ignore
+    Atomic.fetch_and_add atomic_bytes_processed bytes |> ignore
   
   let record_diff_operation () =
     Atomic.incr atomic_diff_operations
@@ -151,21 +151,21 @@ module PerfMonitor = struct
     Atomic.incr atomic_state_transitions
   
   let get_stats () = {
-    queue_enqueues = Atomic.get atomic_queue_enqueues;
-    queue_dequeues = Atomic.get atomic_queue_dequeues;
-    bytes_processed = Atomic.get atomic_bytes_processed;
-    diff_operations = Atomic.get atomic_diff_operations;
-    replication_operations = Atomic.get atomic_replication_operations;
-    state_transitions = Atomic.get atomic_state_transitions;
+    queue_enqueues = Int64.of_int (Atomic.get atomic_queue_enqueues);
+    queue_dequeues = Int64.of_int (Atomic.get atomic_queue_dequeues);
+    bytes_processed = Int64.of_int (Atomic.get atomic_bytes_processed);
+    diff_operations = Int64.of_int (Atomic.get atomic_diff_operations);
+    replication_operations = Int64.of_int (Atomic.get atomic_replication_operations);
+    state_transitions = Int64.of_int (Atomic.get atomic_state_transitions);
   }
   
   let reset_stats () =
-    Atomic.set atomic_queue_enqueues 0L;
-    Atomic.set atomic_queue_dequeues 0L;
-    Atomic.set atomic_bytes_processed 0L;
-    Atomic.set atomic_diff_operations 0L;
-    Atomic.set atomic_replication_operations 0L;
-    Atomic.set atomic_state_transitions 0L
+    Atomic.set atomic_queue_enqueues 0;
+    Atomic.set atomic_queue_dequeues 0;
+    Atomic.set atomic_bytes_processed 0;
+    Atomic.set atomic_diff_operations 0;
+    Atomic.set atomic_replication_operations 0;
+    Atomic.set atomic_state_transitions 0
 end
 
 (** High-level API functions *)

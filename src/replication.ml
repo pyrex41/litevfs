@@ -65,7 +65,7 @@ let encode_write_batch batch =
   let pos = ref 0 in
   
   (* Write header *)
-  let magic = 0x44495354l in (* "DIST" *)
+  let magic = Protocol_constants.dist_magic in
   Array1.set buffer (!pos + 0) (Char.chr (Int32.to_int (Int32.shift_right magic 24)));
   Array1.set buffer (!pos + 1) (Char.chr (Int32.to_int (Int32.shift_right magic 16) land 0xFF));
   Array1.set buffer (!pos + 2) (Char.chr (Int32.to_int (Int32.shift_right magic 8) land 0xFF));
@@ -163,17 +163,17 @@ module RsyncProtocol = struct
   (** Message type constants matching sqlite3_rsync *)
   let origin_begin_type = 0x41
   let origin_end_type = 0x42
-  let origin_error_type = 0x43
+  let origin_error_type = Protocol_constants.origin_error_type
   let origin_page_type = 0x44
   let origin_txn_type = 0x45
-  let origin_msg_type = 0x46
+  let origin_msg_type = Protocol_constants.origin_msg_type
   
   let replica_begin_type = 0x61
-  let replica_error_type = 0x62
+  let replica_error_type = Protocol_constants.replica_error_type
   let replica_end_type = 0x63
-  let replica_hash_type = 0x64
+  let replica_hash_type = Protocol_constants.replica_hash_type
   let replica_ready_type = 0x65
-  let replica_msg_type = 0x66
+  let replica_msg_type = Protocol_constants.replica_msg_type
   
   (** Utility functions for binary encoding *)
   let write_uint32 buf offset value =
@@ -206,11 +206,18 @@ module RsyncProtocol = struct
         Array1.set buffer 0 (Char.chr origin_end_type);
         buffer
         
-    | OriginError msg | OriginMsg msg ->
+    | OriginError msg ->
         let msg_len = String.length msg in
         let buffer = Array1.create char c_layout (5 + msg_len) in
-        let msg_type = if msg = OriginError msg then origin_error_type else origin_msg_type in
-        Array1.set buffer 0 (Char.chr msg_type);
+        Array1.set buffer 0 (Char.chr origin_error_type);
+        write_uint32 buffer 1 msg_len;
+        write_string buffer 5 msg;
+        buffer
+        
+    | OriginMsg msg ->
+        let msg_len = String.length msg in
+        let buffer = Array1.create char c_layout (5 + msg_len) in
+        Array1.set buffer 0 (Char.chr origin_msg_type);
         write_uint32 buffer 1 msg_len;
         write_string buffer 5 msg;
         buffer
@@ -242,16 +249,23 @@ module RsyncProtocol = struct
         Array1.set buffer 0 (Char.chr replica_end_type);
         buffer
         
-    | ReplicaError msg | ReplicaMsg msg ->
+    | ReplicaError msg ->
         let msg_len = String.length msg in
         let buffer = Array1.create char c_layout (5 + msg_len) in
-        let msg_type = if msg = ReplicaError msg then replica_error_type else replica_msg_type in
-        Array1.set buffer 0 (Char.chr msg_type);
+        Array1.set buffer 0 (Char.chr replica_error_type);
         write_uint32 buffer 1 msg_len;
         write_string buffer 5 msg;
         buffer
         
-    | ReplicaHash { page_num; hash } ->
+    | ReplicaMsg msg ->
+        let msg_len = String.length msg in
+        let buffer = Array1.create char c_layout (5 + msg_len) in
+        Array1.set buffer 0 (Char.chr replica_msg_type);
+        write_uint32 buffer 1 msg_len;
+        write_string buffer 5 msg;
+        buffer
+        
+    | ReplicaHash { page_num = _; hash } ->
         let buffer = Array1.create char c_layout 21 in (* 1 + 20 for hash *)
         Array1.set buffer 0 (Char.chr replica_hash_type);
         (* Hash is fixed 20 bytes *)

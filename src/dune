@@ -1,15 +1,28 @@
 (library
  (public_name distsqlite-core)
  (name distcore)
- (modules distcore lock_free_queue binary_diff replication lease_state_machine)
- (libraries bigarray-compat))
+ (modules distcore lock_free_queue binary_diff replication lease_state_machine protocol_constants build_config)
+ (libraries threads unix))
 
 (rule
  (targets libdistcore.so)
- (deps distcore_stubs.c distcore.cma)
+ (deps distcore_stubs.c)
  (action
-  (run gcc -shared -fPIC -O3 -DCAML_NAME_SPACE -o libdistcore.so 
-       distcore_stubs.c 
-       distcore.cma
-       -I %{ocaml_where}
-       -lasmrun_shared -lm -lunix -ldl)))
+  (bash "
+    # Detect CPU features and set appropriate flags
+    if grep -q avx2 /proc/cpuinfo 2>/dev/null; then
+      SIMD_FLAGS='-mavx2 -DHAVE_AVX2'
+    elif grep -q sse2 /proc/cpuinfo 2>/dev/null; then
+      SIMD_FLAGS='-msse2 -DHAVE_SSE2'
+    else
+      SIMD_FLAGS='-DNO_SIMD'
+    fi
+    
+    # Use the correct OCaml include path
+    OCAML_INCLUDE='/usr/lib/x86_64-linux-gnu/ocaml/5.3.0'
+    
+    gcc -shared -fPIC -O3 $SIMD_FLAGS -DCAML_NAME_SPACE -o libdistcore.so \
+        distcore_stubs.c \
+        -I $OCAML_INCLUDE \
+        -lsqlite3 -lm -ldl
+  ")))

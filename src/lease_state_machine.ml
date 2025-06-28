@@ -24,7 +24,7 @@ let transition state event =
   match state, event with
   
   (* Follower state transitions *)
-  | Follower { leader; fence }, Tick current_time ->
+  | Follower { leader = _; fence = _ }, Tick _current_time ->
       (* Stay in follower state, no actions needed *)
       state, []
       
@@ -77,7 +77,7 @@ let transition state event =
       state, [StartElection]
   
   (* Leader state transitions *)
-  | Leader { fence; expires_at }, Tick current_time ->
+  | Leader { fence = _; expires_at }, Tick current_time ->
       if current_time >= expires_at -. 10.0 then
         (* Lease expiring soon, renew it *)
         state, [RenewLease]
@@ -85,7 +85,7 @@ let transition state event =
         (* Still valid leader *)
         state, []
         
-  | Leader { fence; expires_at }, LeaseAcquired { fence = new_fence } ->
+  | Leader { fence = _; expires_at = _ }, LeaseAcquired { fence = new_fence } ->
       (* Successfully renewed lease *)
       Leader { fence = new_fence; expires_at = Unix.time () +. 30.0 }, []
       
