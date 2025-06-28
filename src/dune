@@ -6,7 +6,7 @@
 
 (rule
  (targets libdistcore.so)
- (deps distcore_stubs.c)
+ (deps distcore_stubs.c distcore.cma distcore.cmxa)
  (action
   (bash "
     # Detect CPU features and set appropriate flags
@@ -18,11 +18,14 @@
       SIMD_FLAGS='-DNO_SIMD'
     fi
     
-    # Use the correct OCaml include path
-    OCAML_INCLUDE='/usr/lib/x86_64-linux-gnu/ocaml/5.3.0'
+    # Get OCaml runtime library paths
+    OCAML_LIB='/usr/lib/x86_64-linux-gnu/ocaml/5.3.0'
     
+    # Build shared library with OCaml runtime
     gcc -shared -fPIC -O3 $SIMD_FLAGS -DCAML_NAME_SPACE -o libdistcore.so \
         distcore_stubs.c \
-        -I $OCAML_INCLUDE \
-        -lsqlite3 -lm -ldl
+        -I $OCAML_LIB \
+        -L $OCAML_LIB \
+        -lasmrun_shared \
+        -lsqlite3 -lm -ldl -lpthread
   ")))
