@@ -73,6 +73,16 @@ module MemOps = struct
     (char, int8_unsigned_elt, c_layout) Array1.t -> int -> int -> int32 = "distcore_hash_simd_stub"
 end
 
+(** Health check function for C injection *)
+let health_check () =
+  try
+    (* Test basic OCaml functionality *)
+    let _ = Random.int 100 in
+    let _ = List.length [1; 2; 3] in
+    true
+  with
+  | _ -> false
+
 (** Callback registration for C interop *)
 let () =
   Callback.register "queue_create" (fun capacity ->
@@ -105,6 +115,10 @@ let () =
   
   Callback.register "lease_transition" (fun state event ->
     LeaseStateMachine.transition state event
+  );
+  
+  Callback.register "health_check" (fun () ->
+    health_check ()
   )
 
 (** Initialization function called from C *)

@@ -1,0 +1,85 @@
+# Build artifacts
+build/
+_build/
+*.o
+*.cmx
+*.cmi
+*.cmo
+*.cmxa
+*.cma
+*.a
+*.so
+dll*.so
+
+# OCaml specific
+*.annot
+*.cmt
+*.cmti
+*.spot
+*.spit
+*.cmxs
+*.ml.d
+*.mli.d
+.merlin
+_opam/
+
+# Executables
+distsqlite
+distsqlite-coordinator
+distsqlite-leaseserver
+distsqlite-inject.so
+test-integration
+test_vfs_registration
+test_ocaml_init
+test_vfs_simple
+
+# Test artifacts
+*.db
+*.db-wal
+*.db-shm
+test_*.db*
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Core dumps
+core
+core.*
+*.core
+
+# Dependencies
+/vendor/
+/node_modules/
+
+# Go specific
+*.exe
+*.dll
+*.dylib
+*.test
+*.out
+go.work
+
+# Coverage files
+*.cover
+*.coverage
+coverage.txt
+coverage.html
+
+# Debug files
+*.pdb
+
+# Large binary files
+sqlite3
+sqlite3_analyzer
+sqlite3_rsync
+sqldiff

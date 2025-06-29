@@ -1,21 +1,21 @@
 (* Protocol Constants for DistSQLite Replication *)
 
 (* Magic numbers for protocol identification *)
-let dist_magic = 0x44495354l  (* "DIST" in little-endian *)
+let dist_magic = 0x44495354l (* "DIST" *)
 let sqlite_magic = 0x53514C69l  (* "SQLi" in little-endian *)
 
 (* Message type constants *)
 let origin_error_type = 0x01
 let origin_msg_type = 0x02
 let replica_error_type = 0x03
-let replica_msg_type = 0x04
-let replica_hash_type = 0x05
+let replica_msg_type = 0x05
+let replica_hash_type = 0x04
 
 (* Protocol version *)
 let protocol_version = 1
 
 (* Buffer size limits *)
-let max_message_size = 1024 * 1024  (* 1MB *)
+let max_message_size = 16 * 1024 * 1024 (* 16MB *)
 let max_path_length = 4096
 let max_batch_size = 1000
 

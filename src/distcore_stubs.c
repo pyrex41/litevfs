@@ -10,6 +10,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>    /* For bool type */
+#include "distcore_errors.h"
+#include "distcore_thread_safety.h"
 #ifdef HAVE_AVX2
 #include <immintrin.h>  /* For AVX2 intrinsics */
 #elif defined(HAVE_SSE2)
@@ -19,6 +21,7 @@
 #include <errno.h>      /* For error codes */
 #include <limits.h>     /* For overflow checks */
 #include <stdio.h>      /* For logging */
+#include <stdlib.h>     /* For getenv */
 
 /* Security constants */
 #define MAX_PATH_LENGTH 4096        /* Maximum safe path length */
@@ -120,10 +123,151 @@ void distcore_cleanup_write_events(write_event_t* events, int count) {
     }
 }
 
-/* Initialize OCaml runtime - called once from Go */
-void distcore_init() {
+/* Global variables expected by OCaml runtime */
+value *caml_globals = NULL;
+void *caml_globals_map = NULL;
+char **caml_program = NULL;
+void *caml_code_segments = NULL;
+struct caml_ba_proxy_ {void *data;} caml_ba_proxy = {NULL};
+char *caml_frametable = NULL;
+intnat caml_young_limit = 0;
+intnat caml_young_ptr = 0;
+
+/* OCaml exception variables - comprehensive set */
+value caml_exn_Failure = 0;
+value caml_exn_Invalid_argument = 0;
+value caml_exn_Not_found = 0;
+value caml_exn_Assert_failure = 0;
+value caml_exn_Out_of_memory = 0;
+value caml_exn_Stack_overflow = 0;
+value caml_exn_Sys_error = 0;
+value caml_exn_End_of_file = 0;
+value caml_exn_Division_by_zero = 0;
+value caml_exn_Match_failure = 0;
+value caml_exn_Sys_blocked_io = 0;
+value caml_exn_Undefined_recursive_module = 0;
+int caml_runtime_warnings = 0;
+int caml_setup_args_is_done = 0;
+
+/* Custom operations for int64 */
+struct custom_operations caml_int64_ops = {
+    "int64",
+    NULL,  /* finalize */
+    NULL,  /* compare */
+    NULL,  /* hash */
+    NULL,  /* serialize */
+    NULL,  /* deserialize */
+    NULL,  /* compare_ext */
+    NULL   /* fixed_length */
+};
+
+/* Custom operations for int32 */
+struct custom_operations caml_int32_ops = {
+    "int32",
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL
+};
+
+/* Custom operations for nativeint */
+struct custom_operations caml_nativeint_ops = {
+    "nativeint",
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL
+};
+
+/* Missing OCaml apply functions - implementing them ourselves */
+value caml_apply2(value fun, value arg1, value arg2) {
+    CAMLparam3(fun, arg1, arg2);
+    CAMLlocal1(result);
+    
+    value args[2] = {arg1, arg2};
+    result = caml_callbackN(fun, 2, args);
+    CAMLreturn(result);
+}
+
+value caml_apply3(value fun, value arg1, value arg2, value arg3) {
+    CAMLparam4(fun, arg1, arg2, arg3);
+    CAMLlocal1(result);
+    
+    value args[3] = {arg1, arg2, arg3};
+    result = caml_callbackN(fun, 3, args);
+    CAMLreturn(result);
+}
+
+/* Additional common OCaml runtime functions - removed, conflicts with static lib */
+
+/* Implementing missing OCaml Sys module functions */
+#include <sys/stat.h>
+
+value caml_sys_file_exists(value name) {
+    struct stat st;
+    return Val_bool(stat(String_val(name), &st) == 0);
+}
+
+/* Forward declaration */
+int distcore_register_vfs();
+
+/* Initialize OCaml runtime - called once from Go or injection */
+int distcore_init(void) {
+    static int initialized = 0;
+    if (initialized) return DISTCORE_OK;
+    initialized = 1;
+    
+    /* Initialize thread safety first */
+    int rc = distcore_thread_safety_init();
+    if (rc != DISTCORE_OK) {
+        fprintf(stderr, "[DistCore] Failed to initialize thread safety: %s\n", 
+                distcore_error_string(rc));
+        return rc;
+    }
+    
+    printf("[DistCore] Initializing OCaml runtime...\n");
     char *argv[] = {"distcore", NULL};
+    
+    DISTCORE_OCAML_LOCK();
     caml_startup(argv);
+    DISTCORE_OCAML_UNLOCK();
+    
+    printf("[DistCore] OCaml runtime initialized successfully\n");
+    
+    /* Don't register VFS here - it will be done in distcore_init_vfs */
+    return DISTCORE_OK;
+}
+
+/* Initialize VFS - separate from OCaml init */
+int distcore_init_vfs(void) {
+    static int vfs_initialized = 0;
+    if (vfs_initialized) return 0;
+    vfs_initialized = 1;
+    
+    /* Make sure OCaml is initialized first */
+    distcore_init();
+    
+    /* Register the VFS */
+    printf("[DistCore] Registering SQLite VFS...\n");
+    if (distcore_register_vfs() != 0) {
+        fprintf(stderr, "[DistCore] Failed to register VFS\n");
+        return -1;
+    }
+    
+    return 0;
+}
+
+/* Health check for injection library */
+int distcore_health_check(void) {
+    // Simple health check - return 0 if OCaml runtime is working
+    CAMLparam0();
+    CAMLlocal1(result);
+    
+    static value *health_func = NULL;
+    if (!health_func) {
+        health_func = caml_named_value("health_check");
+        if (!health_func) {
+            // If no health check function, assume we're healthy if runtime works
+            CAMLreturnT(int, 0);
+        }
+    }
+    
+    result = caml_callback(*health_func, Val_unit);
+    CAMLreturnT(int, Bool_val(result) ? 0 : 1);
 }
 
 /* Lock-free write queue operations */
@@ -534,37 +678,9 @@ value distcore_memcmp_stub(value v_arr1, value v_offset1, value v_arr2, value v_
     char* ptr1 = (char*)ba1->data + offset1;
     char* ptr2 = (char*)ba2->data + offset2;
     
-    /* SIMD-optimized comparison for aligned data - check CPU support first */
-    if (check_avx2_support() && len >= 32 && 
-        ((uintptr_t)ptr1 % 32) == 0 && ((uintptr_t)ptr2 % 32) == 0) {
-        int simd_len = len & ~31; /* Round down to multiple of 32 */
-        
-        for (int i = 0; i < simd_len; i += 32) {
-            __m256i a = _mm256_load_si256((__m256i*)(ptr1 + i));
-            __m256i b = _mm256_load_si256((__m256i*)(ptr2 + i));
-            __m256i cmp = _mm256_cmpeq_epi8(a, b);
-            
-            if (_mm256_movemask_epi8(cmp) != 0xFFFFFFFF) {
-                /* Found difference, fall back to byte-by-byte comparison */
-                for (int j = i; j < i + 32 && j < len; j++) {
-                    int diff = ptr1[j] - ptr2[j];
-                    if (diff != 0) CAMLreturn(Val_int(diff));
-                }
-            }
-        }
-        
-        /* Compare remaining bytes */
-        for (int i = simd_len; i < len; i++) {
-            int diff = ptr1[i] - ptr2[i];
-            if (diff != 0) CAMLreturn(Val_int(diff));
-        }
-        
-        CAMLreturn(Val_int(0));
-    } else {
-        /* Fall back to standard memcmp */
-        int result = memcmp(ptr1, ptr2, len);
-        CAMLreturn(Val_int(result));
-    }
+    /* Fall back to standard memcmp - SIMD disabled for now */
+    int result = memcmp(ptr1, ptr2, len);
+    CAMLreturn(Val_int(result));
 }
 
 /* Enhanced SIMD memory copy with security validation */
@@ -621,24 +737,8 @@ value distcore_memcpy_stub(value v_dst, value v_dst_offset, value v_src, value v
         CAMLreturn(Val_unit);
     }
     
-    /* SIMD-optimized copy for aligned data */
-    if (check_avx2_support() && len >= 32 && 
-        ((uintptr_t)dst % 32) == 0 && ((uintptr_t)src % 32) == 0) {
-        int simd_len = len & ~31;
-        
-        for (int i = 0; i < simd_len; i += 32) {
-            __m256i data = _mm256_load_si256((__m256i*)(src + i));
-            _mm256_store_si256((__m256i*)(dst + i), data);
-        }
-        
-        /* Copy remaining bytes */
-        if (simd_len < len) {
-            memcpy(dst + simd_len, src + simd_len, len - simd_len);
-        }
-    } else {
-        /* Fall back to standard memcpy */
-        memcpy(dst, src, len);
-    }
+    /* Fall back to standard memcpy - SIMD disabled for now */
+    memcpy(dst, src, len);
     
     CAMLreturn(Val_unit);
 }
@@ -653,46 +753,9 @@ value distcore_hash_simd_stub(value v_data, value v_offset, value v_len) {
     
     uint32_t hash = 0x9e3779b9U;
     
-    /* SIMD hash computation for aligned data */
-    if (len >= 32 && ((uintptr_t)data % 32) == 0) {
-        __m256i hash_vec = _mm256_set1_epi32(hash);
-        __m256i multiplier = _mm256_set1_epi32(0x9e3779b9U);
-        
-        int simd_len = len & ~31;
-        for (int i = 0; i < simd_len; i += 32) {
-            __m256i chunk = _mm256_load_si256((__m256i*)(data + i));
-            
-            /* Convert bytes to 32-bit integers and accumulate hash */
-            __m256i lo = _mm256_unpacklo_epi8(chunk, _mm256_setzero_si256());
-            __m256i hi = _mm256_unpackhi_epi8(chunk, _mm256_setzero_si256());
-            
-            lo = _mm256_unpacklo_epi16(lo, _mm256_setzero_si256());
-            hi = _mm256_unpacklo_epi16(hi, _mm256_setzero_si256());
-            
-            hash_vec = _mm256_mullo_epi32(hash_vec, multiplier);
-            hash_vec = _mm256_add_epi32(hash_vec, lo);
-            hash_vec = _mm256_mullo_epi32(hash_vec, multiplier);
-            hash_vec = _mm256_add_epi32(hash_vec, hi);
-        }
-        
-        /* Reduce hash vector to single value */
-        uint32_t hash_array[8];
-        _mm256_storeu_si256((__m256i*)hash_array, hash_vec);
-        
-        hash = hash_array[0];
-        for (int i = 1; i < 8; i++) {
-            hash ^= hash_array[i];
-        }
-        
-        /* Process remaining bytes */
-        for (int i = simd_len; i < len; i++) {
-            hash = hash * 0x9e3779b9U + (unsigned char)data[i];
-        }
-    } else {
-        /* Fall back to scalar hash */
-        for (int i = 0; i < len; i++) {
-            hash = hash * 0x9e3779b9U + (unsigned char)data[i];
-        }
+    /* Use scalar hash - SIMD disabled for now */
+    for (int i = 0; i < len; i++) {
+        hash = hash * 0x9e3779b9U + (unsigned char)data[i];
     }
     
     CAMLreturn(caml_copy_int32(hash));
@@ -853,6 +916,160 @@ static const sqlite3_io_methods ocaml_io_methods = {
     NULL,                /* xFetch */
     NULL                 /* xUnfetch */
 };
+
+/* Forward declarations for VFS methods */
+static int vfs_open(sqlite3_vfs*, const char*, sqlite3_file*, int, int*);
+static int vfs_delete(sqlite3_vfs*, const char*, int);
+static int vfs_access(sqlite3_vfs*, const char*, int, int*);
+static int vfs_full_pathname(sqlite3_vfs*, const char*, int, char*);
+static void* vfs_dlopen(sqlite3_vfs*, const char*);
+static void vfs_dlerror(sqlite3_vfs*, int, char*);
+static void (*vfs_dlsym(sqlite3_vfs*, void*, const char*))(void);
+static void vfs_dlclose(sqlite3_vfs*, void*);
+static int vfs_randomness(sqlite3_vfs*, int, char*);
+static int vfs_sleep(sqlite3_vfs*, int);
+static int vfs_current_time(sqlite3_vfs*, double*);
+static int vfs_get_last_error(sqlite3_vfs*, int, char*);
+
+/* Get the default VFS */
+static sqlite3_vfs* base_vfs = NULL;
+
+/* Our custom VFS structure */
+static sqlite3_vfs distcore_vfs = {
+    3,                        /* iVersion */
+    sizeof(ocaml_vfs_file),   /* szOsFile */
+    1024,                     /* mxPathname */
+    NULL,                     /* pNext */
+    "distcore",               /* zName */
+    NULL,                     /* pAppData */
+    vfs_open,                 /* xOpen */
+    vfs_delete,               /* xDelete */
+    vfs_access,               /* xAccess */
+    vfs_full_pathname,        /* xFullPathname */
+    vfs_dlopen,               /* xDlOpen */
+    vfs_dlerror,              /* xDlError */
+    vfs_dlsym,                /* xDlSym */
+    vfs_dlclose,              /* xDlClose */
+    vfs_randomness,           /* xRandomness */
+    vfs_sleep,                /* xSleep */
+    vfs_current_time,         /* xCurrentTime */
+    vfs_get_last_error,       /* xGetLastError */
+    NULL,                     /* xCurrentTimeInt64 */
+    NULL,                     /* xSetSystemCall */
+    NULL,                     /* xGetSystemCall */
+    NULL                      /* xNextSystemCall */
+};
+
+/* VFS xOpen implementation */
+static int vfs_open(sqlite3_vfs *pVfs, const char *zName, sqlite3_file *pFile, 
+                    int flags, int *pOutFlags) {
+    ocaml_vfs_file *file = (ocaml_vfs_file*)pFile;
+    
+    /* Initialize the file structure */
+    memset(file, 0, sizeof(ocaml_vfs_file));
+    file->base.pMethods = &ocaml_io_methods;
+    
+    /* Store database path */
+    if (zName) {
+        file->db_path = strdup(zName);
+        if (!file->db_path) {
+            return SQLITE_NOMEM;
+        }
+    }
+    
+    /* Create page tracker */
+    file->page_size = 4096; /* Default SQLite page size */
+    file->ocaml_file = (value)distcore_create_page_tracker(file->page_size);
+    file->intercept_enabled = true;
+    
+    /* For now, we're not actually opening a file - just intercepting */
+    /* In a real implementation, we'd delegate to the base VFS */
+    
+    if (pOutFlags) {
+        *pOutFlags = flags;
+    }
+    
+    printf("[DistCore VFS] Opened database: %s\n", zName ? zName : "(temp)");
+    
+    return SQLITE_OK;
+}
+
+/* Delegate other VFS methods to the base VFS */
+static int vfs_delete(sqlite3_vfs *pVfs, const char *zName, int syncDir) {
+    return base_vfs->xDelete(base_vfs, zName, syncDir);
+}
+
+static int vfs_access(sqlite3_vfs *pVfs, const char *zName, int flags, int *pResOut) {
+    return base_vfs->xAccess(base_vfs, zName, flags, pResOut);
+}
+
+static int vfs_full_pathname(sqlite3_vfs *pVfs, const char *zName, int nOut, char *zOut) {
+    return base_vfs->xFullPathname(base_vfs, zName, nOut, zOut);
+}
+
+static void* vfs_dlopen(sqlite3_vfs *pVfs, const char *zFilename) {
+    return base_vfs->xDlOpen(base_vfs, zFilename);
+}
+
+static void vfs_dlerror(sqlite3_vfs *pVfs, int nByte, char *zErrMsg) {
+    base_vfs->xDlError(base_vfs, nByte, zErrMsg);
+}
+
+static void (*vfs_dlsym(sqlite3_vfs *pVfs, void *p, const char *zSymbol))(void) {
+    return base_vfs->xDlSym(base_vfs, p, zSymbol);
+}
+
+static void vfs_dlclose(sqlite3_vfs *pVfs, void *p) {
+    base_vfs->xDlClose(base_vfs, p);
+}
+
+static int vfs_randomness(sqlite3_vfs *pVfs, int nByte, char *zOut) {
+    return base_vfs->xRandomness(base_vfs, nByte, zOut);
+}
+
+static int vfs_sleep(sqlite3_vfs *pVfs, int microseconds) {
+    return base_vfs->xSleep(base_vfs, microseconds);
+}
+
+static int vfs_current_time(sqlite3_vfs *pVfs, double *pTime) {
+    return base_vfs->xCurrentTime(base_vfs, pTime);
+}
+
+static int vfs_get_last_error(sqlite3_vfs *pVfs, int nByte, char *zOut) {
+    return base_vfs->xGetLastError(base_vfs, nByte, zOut);
+}
+
+/* Register the VFS with SQLite */
+int distcore_register_vfs() {
+    /* Get the default VFS to delegate to */
+    base_vfs = sqlite3_vfs_find(NULL);
+    if (!base_vfs) {
+        fprintf(stderr, "[DistCore VFS] Failed to find default VFS\n");
+        return -1;
+    }
+    
+    /* Register our VFS */
+    int rc = sqlite3_vfs_register(&distcore_vfs, 1); /* Make it default */
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "[DistCore VFS] Failed to register VFS: %d\n", rc);
+        return -1;
+    }
+    
+    printf("[DistCore VFS] Successfully registered VFS 'distcore' as default\n");
+    return 0;
+}
+
+/* Unregister the VFS */
+int distcore_unregister_vfs() {
+    int rc = sqlite3_vfs_unregister(&distcore_vfs);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "[DistCore VFS] Failed to unregister VFS: %d\n", rc);
+        return -1;
+    }
+    
+    printf("[DistCore VFS] Successfully unregistered VFS 'distcore'\n");
+    return 0;
+}
 
 /* Enhanced VFS operations with type safety */
 int distcore_vfs_intercept_read(void* file, char* buffer, int64_t offset, int amount) {
@@ -1048,4 +1265,101 @@ int distcore_compute_diff_pages(int* local_pages, char** local_hashes,
 /* Cleanup function */
 void distcore_cleanup() {
     /* Cleanup resources if needed */
+}
+
+/* Constructor function - automatically called when library is loaded */
+__attribute__((constructor))
+static void distcore_auto_init() {
+    static int auto_initialized = 0;
+    if (auto_initialized) return;
+    auto_initialized = 1;
+    
+    /* Only auto-initialize if we're being loaded via LD_PRELOAD */
+    const char* preload = getenv("LD_PRELOAD");
+    if (!preload || !strstr(preload, "libdistcore.so")) {
+        return;
+    }
+    
+    printf("[DistCore] Loaded via LD_PRELOAD, will initialize on first SQLite use\n");
+    /* Don't initialize here - wait for SQLite to be loaded */
+}
+
+/* Destructor function - automatically called when library is unloaded */
+__attribute__((destructor))
+static void distcore_auto_cleanup() {
+    /* Only cleanup if we actually initialized */
+    static int cleaned_up = 0;
+    if (cleaned_up) return;
+    cleaned_up = 1;
+    
+    /* Unregister VFS if needed */
+    if (base_vfs) {
+        distcore_unregister_vfs();
+    }
+    distcore_cleanup();
+}
+
+/* Hook sqlite3_open to perform lazy initialization */
+#include <dlfcn.h>
+
+typedef int (*sqlite3_open_fn)(const char*, sqlite3**);
+typedef int (*sqlite3_open_v2_fn)(const char*, sqlite3**, int, const char*);
+
+static sqlite3_open_fn real_sqlite3_open = NULL;
+static sqlite3_open_v2_fn real_sqlite3_open_v2 = NULL;
+static int lazy_initialized = 0;
+
+static void lazy_init() {
+    if (lazy_initialized) return;
+    lazy_initialized = 1;
+    
+    printf("[DistCore] Lazy initialization triggered by SQLite usage\n");
+    distcore_init_vfs();
+}
+
+/* Intercept sqlite3_open */
+int sqlite3_open(const char *filename, sqlite3 **ppDb) {
+    lazy_init();
+    
+    if (!real_sqlite3_open) {
+        real_sqlite3_open = (sqlite3_open_fn)dlsym(RTLD_NEXT, "sqlite3_open");
+        if (!real_sqlite3_open) {
+            fprintf(stderr, "[DistCore] Failed to find real sqlite3_open: %s\n", dlerror());
+            return SQLITE_ERROR;
+        }
+        /* Validate the function pointer */
+        if ((void*)real_sqlite3_open == (void*)sqlite3_open) {
+            fprintf(stderr, "[DistCore] dlsym returned our own function!\n");
+            real_sqlite3_open = NULL;
+            return SQLITE_ERROR;
+        }
+    }
+    
+    return real_sqlite3_open(filename, ppDb);
+}
+
+/* Intercept sqlite3_open_v2 */
+int sqlite3_open_v2(const char *filename, sqlite3 **ppDb, int flags, const char *zVfs) {
+    lazy_init();
+    
+    if (!real_sqlite3_open_v2) {
+        real_sqlite3_open_v2 = (sqlite3_open_v2_fn)dlsym(RTLD_NEXT, "sqlite3_open_v2");
+        if (!real_sqlite3_open_v2) {
+            fprintf(stderr, "[DistCore] Failed to find real sqlite3_open_v2: %s\n", dlerror());
+            return SQLITE_ERROR;
+        }
+        /* Validate the function pointer */
+        if ((void*)real_sqlite3_open_v2 == (void*)sqlite3_open_v2) {
+            fprintf(stderr, "[DistCore] dlsym returned our own function!\n");
+            real_sqlite3_open_v2 = NULL;
+            return SQLITE_ERROR;
+        }
+    }
+    
+    /* If no VFS specified and our VFS is registered, use it */
+    if (!zVfs && base_vfs) {
+        zVfs = "distcore";
+    }
+    
+    return real_sqlite3_open_v2(filename, ppDb, flags, zVfs);
 }
