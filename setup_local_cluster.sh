@@ -40,10 +40,9 @@ build_if_needed() {
 start_lease_server() {
     echo "🔐 Starting Lease Server (HTTP:$LEASE_SERVER_PORT, ZMQ:$LEASE_SERVER_ZMQ_PORT)..."
     ./build/distsqlite-leaseserver \
-        --http-addr ":$LEASE_SERVER_PORT" \
-        --zmq-addr ":$LEASE_SERVER_ZMQ_PORT" \
-        --data-dir "$DATA_DIR/leaseserver" \
-        --log-file "$LOG_DIR/leaseserver.log" &
+        -port "$LEASE_SERVER_PORT" \
+        -db "$DATA_DIR/leaseserver/lease.db" \
+        > "$LOG_DIR/leaseserver.log" 2>&1 &
     echo $! > "$LOG_DIR/leaseserver.pid"
     sleep 2
 }
@@ -56,12 +55,10 @@ start_coordinator() {
     
     echo "🎯 Starting Coordinator $coord_num (HTTP:$http_port, ZMQ:$zmq_port)..."
     ./build/distsqlite-coordinator \
-        --http-addr ":$http_port" \
-        --zmq-addr ":$zmq_port" \
-        --lease-server-http "http://localhost:$LEASE_SERVER_PORT" \
-        --lease-server-zmq "tcp://localhost:$LEASE_SERVER_ZMQ_PORT" \
-        --data-dir "$DATA_DIR/coord$coord_num" \
-        --log-file "$LOG_DIR/coord$coord_num.log" &
+        -addr ":$http_port" \
+        -db "$DATA_DIR/coord$coord_num/coord.db" \
+        -lease-port "$((LEASE_SERVER_PORT + coord_num))" \
+        > "$LOG_DIR/coord$coord_num.log" 2>&1 &
     echo $! > "$LOG_DIR/coord$coord_num.pid"
     sleep 1
 }
@@ -74,10 +71,12 @@ start_node() {
     
     echo "🌐 Starting Node $node_num (connecting to coordinator on $coordinator_http_port/$coordinator_zmq_port)..."
     ./build/distsqlite \
-        --coordinator-http "http://localhost:$coordinator_http_port" \
-        --coordinator-zmq "tcp://localhost:$coordinator_zmq_port" \
+        --coordination "http" \
+        --coordinator-url "http://localhost:$coordinator_http_port" \
         --data-dir "$DATA_DIR/node$node_num" \
-        --log-file "$LOG_DIR/node$node_num.log" &
+        --hostname "node$node_num" \
+        --http-addr ":$((8090 + node_num))" \
+        > "$LOG_DIR/node$node_num.log" 2>&1 &
     echo $! > "$LOG_DIR/node$node_num.pid"
     sleep 1
 }

@@ -116,12 +116,10 @@ test_failure_scenarios() {
         
         # Restart coordinator 1
         ./build/distsqlite-coordinator \
-            --http-addr ":8081" \
-            --zmq-addr ":5555" \
-            --lease-server-http "http://localhost:8080" \
-            --lease-server-zmq "tcp://localhost:5558" \
-            --data-dir "./local-cluster-data/coord1" \
-            --log-file "./local-cluster-logs/coord1.log" &
+            -addr ":8081" \
+            -db "./local-cluster-data/coord1/coord.db" \
+            -lease-port "8080" \
+            > "./local-cluster-logs/coord1.log" 2>&1 &
         echo $! > "./local-cluster-logs/coord1.pid"
         sleep 2
     fi
