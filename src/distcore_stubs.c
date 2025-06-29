@@ -124,6 +124,11 @@ void distcore_cleanup_write_events(write_event_t* events, int count) {
 value *caml_globals = NULL;
 void *caml_globals_map = NULL;
 char **caml_program = NULL;
+void *caml_code_segments = NULL;
+struct caml_ba_proxy_ {void *data;} caml_ba_proxy = {NULL};
+char *caml_frametable = NULL;
+intnat caml_young_limit = 0;
+intnat caml_young_ptr = 0;
 
 /* OCaml exception variables - comprehensive set */
 value caml_exn_Failure = 0;
@@ -136,6 +141,34 @@ value caml_exn_Sys_error = 0;
 value caml_exn_End_of_file = 0;
 value caml_exn_Division_by_zero = 0;
 value caml_exn_Match_failure = 0;
+value caml_exn_Sys_blocked_io = 0;
+value caml_exn_Undefined_recursive_module = 0;
+int caml_runtime_warnings = 0;
+int caml_setup_args_is_done = 0;
+
+/* Custom operations for int64 */
+struct custom_operations caml_int64_ops = {
+    "int64",
+    NULL,  /* finalize */
+    NULL,  /* compare */
+    NULL,  /* hash */
+    NULL,  /* serialize */
+    NULL,  /* deserialize */
+    NULL,  /* compare_ext */
+    NULL   /* fixed_length */
+};
+
+/* Custom operations for int32 */
+struct custom_operations caml_int32_ops = {
+    "int32",
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL
+};
+
+/* Custom operations for nativeint */
+struct custom_operations caml_nativeint_ops = {
+    "nativeint",
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL
+};
 
 /* Missing OCaml apply functions - implementing them ourselves */
 value caml_apply2(value fun, value arg1, value arg2) {
@@ -156,21 +189,14 @@ value caml_apply3(value fun, value arg1, value arg2, value arg3) {
     CAMLreturn(result);
 }
 
-/* Additional common OCaml runtime functions */
-void caml_enter_blocking_section(void) {
-    /* No-op for now */
-}
+/* Additional common OCaml runtime functions - removed, conflicts with static lib */
 
-void caml_leave_blocking_section(void) {
-    /* No-op for now */
-}
+/* Implementing missing OCaml Sys module functions */
+#include <sys/stat.h>
 
-void caml_release_runtime_system(void) {
-    /* No-op for now */
-}
-
-void caml_acquire_runtime_system(void) {
-    /* No-op for now */
+value caml_sys_file_exists(value name) {
+    struct stat st;
+    return Val_bool(stat(String_val(name), &st) == 0);
 }
 
 /* Initialize OCaml runtime - called once from Go or injection */
@@ -179,8 +205,10 @@ int distcore_init(void) {
     if (initialized) return 0;
     initialized = 1;
     
+    printf("[DistCore] Initializing OCaml runtime...\n");
     char *argv[] = {"distcore", NULL};
     caml_startup(argv);
+    printf("[DistCore] OCaml runtime initialized successfully\n");
     return 0;
 }
 

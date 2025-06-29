@@ -13,7 +13,7 @@
 #  ; build_dir = In_build_dir "default"
 #  ; instrument_with = []
 #  }
-$ /usr/bin/ocamlc.opt -config > /tmp/dune_8a81bf_output
+$ /usr/bin/ocamlc.opt -config > /tmp/dune_4c4609_output
 $ (cd _build/default/src && /usr/bin/bash -e -u -o pipefail -c '
     # Set up opam environment
     eval $(opam env)
@@ -21,59 +21,64 @@ $ (cd _build/default/src && /usr/bin/bash -e -u -o pipefail -c '
     # Get OCaml paths from opam environment
     OCAML_LIB=$(ocamlopt -config | grep standard_library: | cut -d'\'' '\'' -f2)
     
-    # Build shared library with OCaml objects - simplified approach
+    # Build shared library using ocamlmklib for proper OCaml integration
     gcc -fPIC -O3 -DCAML_NAME_SPACE -DNO_SIMD -c distcore_stubs.c -I $OCAML_LIB
-    gcc -shared -fPIC -o libdistcore.so distcore_stubs.o .distcore.objs/native/distcore.o .distcore.objs/native/distcore__*.o -L $OCAML_LIB -lasmrun_shared -lsqlite3 -lm -ldl -lpthread
+    
+    # Use ocamlmklib to create shared library with all OCaml dependencies
+    ocamlmklib -o distcore_dyn distcore_stubs.o .distcore.objs/native/distcore.o .distcore.objs/native/distcore__*.o -cclib '\''-lsqlite3 -lm -ldl -lpthread'\''
+    
+    # Copy the final shared library
+    cp dlldistcore_dyn.so libdistcore.so
   ')
 > distcore_stubs.c: In function ‘distcore_health_check’:
-> distcore_stubs.c:194:21: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
->   194 |         health_func = caml_named_value("health_check");
+> distcore_stubs.c:223:21: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+>   223 |         health_func = caml_named_value("health_check");
 >       |                     ^
 > distcore_stubs.c: In function ‘distcore_queue_create’:
-> distcore_stubs.c:212:21: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
->   212 |         create_func = caml_named_value("queue_create");
+> distcore_stubs.c:241:21: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+>   241 |         create_func = caml_named_value("queue_create");
 >       |                     ^
 > distcore_stubs.c: In function ‘distcore_queue_enqueue’:
-> distcore_stubs.c:241:22: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
->   241 |         enqueue_func = caml_named_value("queue_enqueue");
+> distcore_stubs.c:270:22: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+>   270 |         enqueue_func = caml_named_value("queue_enqueue");
 >       |                      ^
 > distcore_stubs.c: In function ‘distcore_queue_dequeue_batch’:
-> distcore_stubs.c:269:22: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
->   269 |         dequeue_func = caml_named_value("queue_dequeue_batch");
+> distcore_stubs.c:298:22: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+>   298 |         dequeue_func = caml_named_value("queue_dequeue_batch");
 >       |                      ^
 > distcore_stubs.c: In function ‘distcore_queue_pending_count’:
-> distcore_stubs.c:377:22: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
->   377 |         pending_func = caml_named_value("queue_pending_count");
+> distcore_stubs.c:406:22: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+>   406 |         pending_func = caml_named_value("queue_pending_count");
 >       |                      ^
 > distcore_stubs.c: In function ‘distcore_compute_strategy’:
-> distcore_stubs.c:420:23: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
->   420 |         strategy_func = caml_named_value("compute_strategy");
+> distcore_stubs.c:449:23: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+>   449 |         strategy_func = caml_named_value("compute_strategy");
 >       |                       ^
 > distcore_stubs.c: In function ‘distcore_encode_write_batch’:
-> distcore_stubs.c:486:21: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
->   486 |         encode_func = caml_named_value("encode_write_batch");
+> distcore_stubs.c:515:21: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+>   515 |         encode_func = caml_named_value("encode_write_batch");
 >       |                     ^
 > distcore_stubs.c: In function ‘distcore_compute_diff’:
-> distcore_stubs.c:553:19: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
->   553 |         diff_func = caml_named_value("compute_diff");
+> distcore_stubs.c:582:19: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+>   582 |         diff_func = caml_named_value("compute_diff");
 >       |                   ^
 > distcore_stubs.c: In function ‘distcore_create_page_tracker’:
-> distcore_stubs.c:715:21: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
->   715 |         create_func = caml_named_value("create_page_tracker");
+> distcore_stubs.c:744:21: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+>   744 |         create_func = caml_named_value("create_page_tracker");
 >       |                     ^
 > distcore_stubs.c: In function ‘vfs_read’:
-> distcore_stubs.c:749:23: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
->   749 |             read_func = caml_named_value("vfs_intercept_read");
+> distcore_stubs.c:778:23: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+>   778 |             read_func = caml_named_value("vfs_intercept_read");
 >       |                       ^
 > distcore_stubs.c: In function ‘vfs_write’:
-> distcore_stubs.c:792:24: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
->   792 |             write_func = caml_named_value("vfs_intercept_write");
+> distcore_stubs.c:821:24: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+>   821 |             write_func = caml_named_value("vfs_intercept_write");
 >       |                        ^
 > distcore_stubs.c: In function ‘distcore_get_sync_pages’:
-> distcore_stubs.c:923:25: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
->   923 |         sync_pages_func = caml_named_value("get_sync_pages");
+> distcore_stubs.c:952:25: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+>   952 |         sync_pages_func = caml_named_value("get_sync_pages");
 >       |                         ^
 > distcore_stubs.c: In function ‘distcore_compute_diff_pages’:
-> distcore_stubs.c:1018:19: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
->  1018 |         diff_func = caml_named_value("compute_diff_pages");
+> distcore_stubs.c:1047:19: warning: assignment discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+>  1047 |         diff_func = caml_named_value("compute_diff_pages");
 >       |                   ^
