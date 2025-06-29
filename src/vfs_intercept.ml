@@ -57,6 +57,11 @@ module PageTracker = struct
     with Queue.Empty -> !result
 end
 
+(** External base VFS functions - implemented in C stubs *)
+external vfs_base_read : Nativeint.t -> (char, int8_unsigned_elt, c_layout) Array1.t -> int64 -> int -> int = "caml_vfs_base_read"
+external vfs_base_write : Nativeint.t -> (char, int8_unsigned_elt, c_layout) Array1.t -> int64 -> int -> int = "caml_vfs_base_write"
+external vfs_base_close : Nativeint.t -> int = "caml_vfs_base_close"
+
 (** VFS file handle with page tracking *)
 type vfs_file = {
   base_file: Nativeint.t; (* Opaque pointer to base VFS file *)
@@ -123,11 +128,6 @@ let vfs_write file buffer offset amount =
   
   (* Also write to actual file *)
   vfs_base_write file.base_file buffer offset amount
-
-(** External base VFS functions - implemented in C stubs *)
-external vfs_base_read : Nativeint.t -> (char, int8_unsigned_elt, c_layout) Array1.t -> int64 -> int -> int = "caml_vfs_base_read"
-external vfs_base_write : Nativeint.t -> (char, int8_unsigned_elt, c_layout) Array1.t -> int64 -> int -> int = "caml_vfs_base_write"
-external vfs_base_close : Nativeint.t -> int = "caml_vfs_base_close"
 
 (** High-level sync integration *)
 module SyncIntegration = struct
