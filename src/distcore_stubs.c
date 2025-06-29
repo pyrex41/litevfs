@@ -10,6 +10,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>    /* For bool type */
+#include "distcore_errors.h"
+#include "distcore_thread_safety.h"
 #ifdef HAVE_AVX2
 #include <immintrin.h>  /* For AVX2 intrinsics */
 #elif defined(HAVE_SSE2)
@@ -206,16 +208,28 @@ int distcore_register_vfs();
 /* Initialize OCaml runtime - called once from Go or injection */
 int distcore_init(void) {
     static int initialized = 0;
-    if (initialized) return 0;
+    if (initialized) return DISTCORE_OK;
     initialized = 1;
+    
+    /* Initialize thread safety first */
+    int rc = distcore_thread_safety_init();
+    if (rc != DISTCORE_OK) {
+        fprintf(stderr, "[DistCore] Failed to initialize thread safety: %s\n", 
+                distcore_error_string(rc));
+        return rc;
+    }
     
     printf("[DistCore] Initializing OCaml runtime...\n");
     char *argv[] = {"distcore", NULL};
+    
+    DISTCORE_OCAML_LOCK();
     caml_startup(argv);
+    DISTCORE_OCAML_UNLOCK();
+    
     printf("[DistCore] OCaml runtime initialized successfully\n");
     
     /* Don't register VFS here - it will be done in distcore_init_vfs */
-    return 0;
+    return DISTCORE_OK;
 }
 
 /* Initialize VFS - separate from OCaml init */
@@ -1310,7 +1324,13 @@ int sqlite3_open(const char *filename, sqlite3 **ppDb) {
     if (!real_sqlite3_open) {
         real_sqlite3_open = (sqlite3_open_fn)dlsym(RTLD_NEXT, "sqlite3_open");
         if (!real_sqlite3_open) {
-            fprintf(stderr, "[DistCore] Failed to find real sqlite3_open\n");
+            fprintf(stderr, "[DistCore] Failed to find real sqlite3_open: %s\n", dlerror());
+            return SQLITE_ERROR;
+        }
+        /* Validate the function pointer */
+        if ((void*)real_sqlite3_open == (void*)sqlite3_open) {
+            fprintf(stderr, "[DistCore] dlsym returned our own function!\n");
+            real_sqlite3_open = NULL;
             return SQLITE_ERROR;
         }
     }
@@ -1325,7 +1345,13 @@ int sqlite3_open_v2(const char *filename, sqlite3 **ppDb, int flags, const char 
     if (!real_sqlite3_open_v2) {
         real_sqlite3_open_v2 = (sqlite3_open_v2_fn)dlsym(RTLD_NEXT, "sqlite3_open_v2");
         if (!real_sqlite3_open_v2) {
-            fprintf(stderr, "[DistCore] Failed to find real sqlite3_open_v2\n");
+            fprintf(stderr, "[DistCore] Failed to find real sqlite3_open_v2: %s\n", dlerror());
+            return SQLITE_ERROR;
+        }
+        /* Validate the function pointer */
+        if ((void*)real_sqlite3_open_v2 == (void*)sqlite3_open_v2) {
+            fprintf(stderr, "[DistCore] dlsym returned our own function!\n");
+            real_sqlite3_open_v2 = NULL;
             return SQLITE_ERROR;
         }
     }
