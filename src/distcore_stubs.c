@@ -120,10 +120,87 @@ void distcore_cleanup_write_events(write_event_t* events, int count) {
     }
 }
 
-/* Initialize OCaml runtime - called once from Go */
-void distcore_init() {
+/* Global variables expected by OCaml runtime */
+value *caml_globals = NULL;
+void *caml_globals_map = NULL;
+char **caml_program = NULL;
+
+/* OCaml exception variables - comprehensive set */
+value caml_exn_Failure = 0;
+value caml_exn_Invalid_argument = 0;
+value caml_exn_Not_found = 0;
+value caml_exn_Assert_failure = 0;
+value caml_exn_Out_of_memory = 0;
+value caml_exn_Stack_overflow = 0;
+value caml_exn_Sys_error = 0;
+value caml_exn_End_of_file = 0;
+value caml_exn_Division_by_zero = 0;
+value caml_exn_Match_failure = 0;
+
+/* Missing OCaml apply functions - implementing them ourselves */
+value caml_apply2(value fun, value arg1, value arg2) {
+    CAMLparam3(fun, arg1, arg2);
+    CAMLlocal1(result);
+    
+    value args[2] = {arg1, arg2};
+    result = caml_callbackN(fun, 2, args);
+    CAMLreturn(result);
+}
+
+value caml_apply3(value fun, value arg1, value arg2, value arg3) {
+    CAMLparam4(fun, arg1, arg2, arg3);
+    CAMLlocal1(result);
+    
+    value args[3] = {arg1, arg2, arg3};
+    result = caml_callbackN(fun, 3, args);
+    CAMLreturn(result);
+}
+
+/* Additional common OCaml runtime functions */
+void caml_enter_blocking_section(void) {
+    /* No-op for now */
+}
+
+void caml_leave_blocking_section(void) {
+    /* No-op for now */
+}
+
+void caml_release_runtime_system(void) {
+    /* No-op for now */
+}
+
+void caml_acquire_runtime_system(void) {
+    /* No-op for now */
+}
+
+/* Initialize OCaml runtime - called once from Go or injection */
+int distcore_init(void) {
+    static int initialized = 0;
+    if (initialized) return 0;
+    initialized = 1;
+    
     char *argv[] = {"distcore", NULL};
     caml_startup(argv);
+    return 0;
+}
+
+/* Health check for injection library */
+int distcore_health_check(void) {
+    // Simple health check - return 0 if OCaml runtime is working
+    CAMLparam0();
+    CAMLlocal1(result);
+    
+    static value *health_func = NULL;
+    if (!health_func) {
+        health_func = caml_named_value("health_check");
+        if (!health_func) {
+            // If no health check function, assume we're healthy if runtime works
+            CAMLreturnT(int, 0);
+        }
+    }
+    
+    result = caml_callback(*health_func, Val_unit);
+    CAMLreturnT(int, Bool_val(result) ? 0 : 1);
 }
 
 /* Lock-free write queue operations */

@@ -6,7 +6,7 @@
 
 (rule
  (targets libdistcore.so)
- (deps distcore_stubs.c distcore.cma distcore.cmxa)
+ (deps distcore_stubs.c distcore_main.c distcore.cma distcore.cmxa)
  (action
   (bash "
     # Set up opam environment
@@ -15,10 +15,8 @@
     # Get OCaml paths from opam environment
     OCAML_LIB=$(ocamlopt -config | grep standard_library: | cut -d' ' -f2)
     
-    # Compile C stubs first
+    # Build shared library with OCaml objects - simplified approach
     gcc -fPIC -O3 -DCAML_NAME_SPACE -DNO_SIMD -c distcore_stubs.c -I $OCAML_LIB
-    
-    # Create shared library manually with all OCaml objects
     gcc -shared -fPIC -o libdistcore.so \
         distcore_stubs.o \
         .distcore.objs/native/distcore.o \
