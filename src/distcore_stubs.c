@@ -19,6 +19,7 @@
 #include <errno.h>      /* For error codes */
 #include <limits.h>     /* For overflow checks */
 #include <stdio.h>      /* For logging */
+#include <stdlib.h>     /* For getenv */
 
 /* Security constants */
 #define MAX_PATH_LENGTH 4096        /* Maximum safe path length */
@@ -199,6 +200,9 @@ value caml_sys_file_exists(value name) {
     return Val_bool(stat(String_val(name), &st) == 0);
 }
 
+/* Forward declaration */
+int distcore_register_vfs();
+
 /* Initialize OCaml runtime - called once from Go or injection */
 int distcore_init(void) {
     static int initialized = 0;
@@ -209,6 +213,27 @@ int distcore_init(void) {
     char *argv[] = {"distcore", NULL};
     caml_startup(argv);
     printf("[DistCore] OCaml runtime initialized successfully\n");
+    
+    /* Don't register VFS here - it will be done in distcore_init_vfs */
+    return 0;
+}
+
+/* Initialize VFS - separate from OCaml init */
+int distcore_init_vfs(void) {
+    static int vfs_initialized = 0;
+    if (vfs_initialized) return 0;
+    vfs_initialized = 1;
+    
+    /* Make sure OCaml is initialized first */
+    distcore_init();
+    
+    /* Register the VFS */
+    printf("[DistCore] Registering SQLite VFS...\n");
+    if (distcore_register_vfs() != 0) {
+        fprintf(stderr, "[DistCore] Failed to register VFS\n");
+        return -1;
+    }
+    
     return 0;
 }
 
@@ -878,6 +903,160 @@ static const sqlite3_io_methods ocaml_io_methods = {
     NULL                 /* xUnfetch */
 };
 
+/* Forward declarations for VFS methods */
+static int vfs_open(sqlite3_vfs*, const char*, sqlite3_file*, int, int*);
+static int vfs_delete(sqlite3_vfs*, const char*, int);
+static int vfs_access(sqlite3_vfs*, const char*, int, int*);
+static int vfs_full_pathname(sqlite3_vfs*, const char*, int, char*);
+static void* vfs_dlopen(sqlite3_vfs*, const char*);
+static void vfs_dlerror(sqlite3_vfs*, int, char*);
+static void (*vfs_dlsym(sqlite3_vfs*, void*, const char*))(void);
+static void vfs_dlclose(sqlite3_vfs*, void*);
+static int vfs_randomness(sqlite3_vfs*, int, char*);
+static int vfs_sleep(sqlite3_vfs*, int);
+static int vfs_current_time(sqlite3_vfs*, double*);
+static int vfs_get_last_error(sqlite3_vfs*, int, char*);
+
+/* Get the default VFS */
+static sqlite3_vfs* base_vfs = NULL;
+
+/* Our custom VFS structure */
+static sqlite3_vfs distcore_vfs = {
+    3,                        /* iVersion */
+    sizeof(ocaml_vfs_file),   /* szOsFile */
+    1024,                     /* mxPathname */
+    NULL,                     /* pNext */
+    "distcore",               /* zName */
+    NULL,                     /* pAppData */
+    vfs_open,                 /* xOpen */
+    vfs_delete,               /* xDelete */
+    vfs_access,               /* xAccess */
+    vfs_full_pathname,        /* xFullPathname */
+    vfs_dlopen,               /* xDlOpen */
+    vfs_dlerror,              /* xDlError */
+    vfs_dlsym,                /* xDlSym */
+    vfs_dlclose,              /* xDlClose */
+    vfs_randomness,           /* xRandomness */
+    vfs_sleep,                /* xSleep */
+    vfs_current_time,         /* xCurrentTime */
+    vfs_get_last_error,       /* xGetLastError */
+    NULL,                     /* xCurrentTimeInt64 */
+    NULL,                     /* xSetSystemCall */
+    NULL,                     /* xGetSystemCall */
+    NULL                      /* xNextSystemCall */
+};
+
+/* VFS xOpen implementation */
+static int vfs_open(sqlite3_vfs *pVfs, const char *zName, sqlite3_file *pFile, 
+                    int flags, int *pOutFlags) {
+    ocaml_vfs_file *file = (ocaml_vfs_file*)pFile;
+    
+    /* Initialize the file structure */
+    memset(file, 0, sizeof(ocaml_vfs_file));
+    file->base.pMethods = &ocaml_io_methods;
+    
+    /* Store database path */
+    if (zName) {
+        file->db_path = strdup(zName);
+        if (!file->db_path) {
+            return SQLITE_NOMEM;
+        }
+    }
+    
+    /* Create page tracker */
+    file->page_size = 4096; /* Default SQLite page size */
+    file->ocaml_file = (value)distcore_create_page_tracker(file->page_size);
+    file->intercept_enabled = true;
+    
+    /* For now, we're not actually opening a file - just intercepting */
+    /* In a real implementation, we'd delegate to the base VFS */
+    
+    if (pOutFlags) {
+        *pOutFlags = flags;
+    }
+    
+    printf("[DistCore VFS] Opened database: %s\n", zName ? zName : "(temp)");
+    
+    return SQLITE_OK;
+}
+
+/* Delegate other VFS methods to the base VFS */
+static int vfs_delete(sqlite3_vfs *pVfs, const char *zName, int syncDir) {
+    return base_vfs->xDelete(base_vfs, zName, syncDir);
+}
+
+static int vfs_access(sqlite3_vfs *pVfs, const char *zName, int flags, int *pResOut) {
+    return base_vfs->xAccess(base_vfs, zName, flags, pResOut);
+}
+
+static int vfs_full_pathname(sqlite3_vfs *pVfs, const char *zName, int nOut, char *zOut) {
+    return base_vfs->xFullPathname(base_vfs, zName, nOut, zOut);
+}
+
+static void* vfs_dlopen(sqlite3_vfs *pVfs, const char *zFilename) {
+    return base_vfs->xDlOpen(base_vfs, zFilename);
+}
+
+static void vfs_dlerror(sqlite3_vfs *pVfs, int nByte, char *zErrMsg) {
+    base_vfs->xDlError(base_vfs, nByte, zErrMsg);
+}
+
+static void (*vfs_dlsym(sqlite3_vfs *pVfs, void *p, const char *zSymbol))(void) {
+    return base_vfs->xDlSym(base_vfs, p, zSymbol);
+}
+
+static void vfs_dlclose(sqlite3_vfs *pVfs, void *p) {
+    base_vfs->xDlClose(base_vfs, p);
+}
+
+static int vfs_randomness(sqlite3_vfs *pVfs, int nByte, char *zOut) {
+    return base_vfs->xRandomness(base_vfs, nByte, zOut);
+}
+
+static int vfs_sleep(sqlite3_vfs *pVfs, int microseconds) {
+    return base_vfs->xSleep(base_vfs, microseconds);
+}
+
+static int vfs_current_time(sqlite3_vfs *pVfs, double *pTime) {
+    return base_vfs->xCurrentTime(base_vfs, pTime);
+}
+
+static int vfs_get_last_error(sqlite3_vfs *pVfs, int nByte, char *zOut) {
+    return base_vfs->xGetLastError(base_vfs, nByte, zOut);
+}
+
+/* Register the VFS with SQLite */
+int distcore_register_vfs() {
+    /* Get the default VFS to delegate to */
+    base_vfs = sqlite3_vfs_find(NULL);
+    if (!base_vfs) {
+        fprintf(stderr, "[DistCore VFS] Failed to find default VFS\n");
+        return -1;
+    }
+    
+    /* Register our VFS */
+    int rc = sqlite3_vfs_register(&distcore_vfs, 1); /* Make it default */
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "[DistCore VFS] Failed to register VFS: %d\n", rc);
+        return -1;
+    }
+    
+    printf("[DistCore VFS] Successfully registered VFS 'distcore' as default\n");
+    return 0;
+}
+
+/* Unregister the VFS */
+int distcore_unregister_vfs() {
+    int rc = sqlite3_vfs_unregister(&distcore_vfs);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "[DistCore VFS] Failed to unregister VFS: %d\n", rc);
+        return -1;
+    }
+    
+    printf("[DistCore VFS] Successfully unregistered VFS 'distcore'\n");
+    return 0;
+}
+
 /* Enhanced VFS operations with type safety */
 int distcore_vfs_intercept_read(void* file, char* buffer, int64_t offset, int amount) {
     /* SECURITY FIX: Enhanced parameter validation */
@@ -1072,4 +1251,89 @@ int distcore_compute_diff_pages(int* local_pages, char** local_hashes,
 /* Cleanup function */
 void distcore_cleanup() {
     /* Cleanup resources if needed */
+}
+
+/* Constructor function - automatically called when library is loaded */
+__attribute__((constructor))
+static void distcore_auto_init() {
+    static int auto_initialized = 0;
+    if (auto_initialized) return;
+    auto_initialized = 1;
+    
+    /* Only auto-initialize if we're being loaded via LD_PRELOAD */
+    const char* preload = getenv("LD_PRELOAD");
+    if (!preload || !strstr(preload, "libdistcore.so")) {
+        return;
+    }
+    
+    printf("[DistCore] Loaded via LD_PRELOAD, will initialize on first SQLite use\n");
+    /* Don't initialize here - wait for SQLite to be loaded */
+}
+
+/* Destructor function - automatically called when library is unloaded */
+__attribute__((destructor))
+static void distcore_auto_cleanup() {
+    /* Only cleanup if we actually initialized */
+    static int cleaned_up = 0;
+    if (cleaned_up) return;
+    cleaned_up = 1;
+    
+    /* Unregister VFS if needed */
+    if (base_vfs) {
+        distcore_unregister_vfs();
+    }
+    distcore_cleanup();
+}
+
+/* Hook sqlite3_open to perform lazy initialization */
+#include <dlfcn.h>
+
+typedef int (*sqlite3_open_fn)(const char*, sqlite3**);
+typedef int (*sqlite3_open_v2_fn)(const char*, sqlite3**, int, const char*);
+
+static sqlite3_open_fn real_sqlite3_open = NULL;
+static sqlite3_open_v2_fn real_sqlite3_open_v2 = NULL;
+static int lazy_initialized = 0;
+
+static void lazy_init() {
+    if (lazy_initialized) return;
+    lazy_initialized = 1;
+    
+    printf("[DistCore] Lazy initialization triggered by SQLite usage\n");
+    distcore_init_vfs();
+}
+
+/* Intercept sqlite3_open */
+int sqlite3_open(const char *filename, sqlite3 **ppDb) {
+    lazy_init();
+    
+    if (!real_sqlite3_open) {
+        real_sqlite3_open = (sqlite3_open_fn)dlsym(RTLD_NEXT, "sqlite3_open");
+        if (!real_sqlite3_open) {
+            fprintf(stderr, "[DistCore] Failed to find real sqlite3_open\n");
+            return SQLITE_ERROR;
+        }
+    }
+    
+    return real_sqlite3_open(filename, ppDb);
+}
+
+/* Intercept sqlite3_open_v2 */
+int sqlite3_open_v2(const char *filename, sqlite3 **ppDb, int flags, const char *zVfs) {
+    lazy_init();
+    
+    if (!real_sqlite3_open_v2) {
+        real_sqlite3_open_v2 = (sqlite3_open_v2_fn)dlsym(RTLD_NEXT, "sqlite3_open_v2");
+        if (!real_sqlite3_open_v2) {
+            fprintf(stderr, "[DistCore] Failed to find real sqlite3_open_v2\n");
+            return SQLITE_ERROR;
+        }
+    }
+    
+    /* If no VFS specified and our VFS is registered, use it */
+    if (!zVfs && base_vfs) {
+        zVfs = "distcore";
+    }
+    
+    return real_sqlite3_open_v2(filename, ppDb, flags, zVfs);
 }
