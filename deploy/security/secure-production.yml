@@ -1,0 +1,292 @@
+# 🔒 SECURE PRODUCTION CONFIGURATION FOR DISTSQLITE
+# This configuration enforces security best practices and disables vulnerable components
+
+# DistSQLite Secure Coordinator Configuration
+name: "distsqlite-secure-coordinator"
+mode: "coordinator"
+hostname: "${HOSTNAME:-coordinator}"
+advertise-url: "tcp://${COORDINATOR_HOST:-coordinator}:5555"
+
+# Paths (secure with restricted permissions)
+data-dir: "/app/data"
+log-dir: "/app/logs"
+permissions:
+  data-dir: "0750"
+  log-dir: "0750"
+  owner: "app:app"
+
+# 🔒 SECURITY-FIRST ZMQ CONFIGURATION
+zmq:
+  # CURVE authentication is MANDATORY for production
+  security:
+    enabled: true
+    curve_enabled: true
+    
+    # Production keys (MUST be set via environment variables)
+    server_public_key: "${ZMQ_SERVER_PUBLIC_KEY}"
+    server_secret_key: "${ZMQ_SERVER_SECRET_KEY}"
+    
+    # Client access control
+    allowed_clients:
+      # Add authorized client public keys here
+      - "${ZMQ_CLIENT_PUBLIC_KEY_1}"
+      - "${ZMQ_CLIENT_PUBLIC_KEY_2}"
+    
+    # Security validation
+    require_client_auth: true
+    validate_timestamps: true
+    max_clock_skew: "30s"
+  
+  # Transport configuration
+  bind_addr: "0.0.0.0:5555"
+  use_private_network: true
+  
+  # Performance with security
+  request_timeout: "5s"
+  retry_attempts: 3
+  high_water_mark: 1000  # Lower for security
+  
+  # Secure WAL replication
+  wal_replication:
+    enabled: true
+    port: 5565  # Separate port for WAL PUB/SUB
+    topic_prefix: "secure-wal:"
+    checksum_validation: true
+    fence_token_validation: true
+
+# 🚫 HTTP ENDPOINTS - SEVERELY RESTRICTED
+http:
+  # HTTP is DISABLED by default for security
+  enabled: false
+  
+  # If HTTP must be enabled, use these secure settings
+  secure_config:
+    bind_addr: "127.0.0.1:8080"  # Localhost only
+    tls:
+      enabled: true
+      cert_file: "/app/certs/server.crt"
+      key_file: "/app/certs/server.key"
+      min_version: "TLS1.3"
+    
+    # Authentication required for ALL endpoints
+    authentication:
+      type: "bearer_token"
+      token_env: "DISTSQLITE_API_TOKEN"
+      required: true
+    
+    # Security headers
+    security_headers:
+      enabled: true
+      headers:
+        X-Content-Type-Options: "nosniff"
+        X-Frame-Options: "DENY"
+        X-XSS-Protection: "1; mode=block"
+        Strict-Transport-Security: "max-age=31536000; includeSubDomains"
+        Content-Security-Policy: "default-src 'none'"
+    
+    # Rate limiting
+    rate_limiting:
+      enabled: true
+      requests_per_minute: 60
+      burst_size: 10
+    
+    # Allowed endpoints (minimal set)
+    endpoints:
+      health: "/health"          # Health check only
+      metrics: "/metrics"        # Metrics (authenticated)
+      # 🚫 DISABLED: /sql-replay (SQL injection vulnerability)
+      # 🚫 DISABLED: /rsync (use ZMQ instead)
+    
+    # Request logging
+    logging:
+      access_log: true
+      include_body: false  # Never log request bodies
+      max_body_size: 1024
+
+# 🔐 SECURE LEASE MANAGEMENT
+lease:
+  # ZMQ-only lease coordination (no HTTP fallback)
+  transport: "zmq_only"
+  
+  # Lease endpoints
+  zmq_endpoints:
+    - "tcp://${LEASE_SERVER_HOST:-leaseserver}:5558"
+  
+  # Security settings
+  security:
+    fence_token_validation: true
+    lease_timeout: "30s"
+    max_lease_duration: "300s"
+    require_renewal: true
+    
+  # Lease validation
+  validation:
+    check_node_health: true
+    verify_fence_tokens: true
+    validate_timestamps: true
+
+# 🔒 SECURE REPLICATION CONFIGURATION
+replication:
+  # Secure WAL replication only
+  method: "secure_wal_zmq"
+  
+  # Disable vulnerable methods
+  disable_sql_replay: true
+  disable_http_rsync: true
+  
+  # ZMQ WAL replication settings
+  wal_replication:
+    enabled: true
+    checksum_validation: true
+    sequence_validation: true
+    fence_token_validation: true
+    max_page_size: 65536
+    compression: "zstd"
+    encryption: "curve25519"
+  
+  # Verification settings
+  verification:
+    enabled: true
+    interval: "1m"
+    checksum_validation: true
+    consistency_checks: true
+
+# 🔍 SECURITY MONITORING
+monitoring:
+  security_events:
+    enabled: true
+    log_level: "info"
+    events:
+      - "authentication_failure"
+      - "authorization_failure"
+      - "invalid_requests"
+      - "rate_limit_exceeded"
+      - "sql_injection_attempt"
+      - "curve_handshake_failure"
+  
+  # Metrics
+  metrics:
+    enabled: true
+    port: 9090
+    path: "/metrics"
+    security:
+      authentication_required: true
+      allowed_ips: ["127.0.0.1", "10.0.0.0/8"]
+
+# 🚨 SECURITY POLICIES
+security_policies:
+  # Enforce security requirements
+  require_curve_auth: true
+  disable_http_sql_replay: true
+  disable_http_rsync: true
+  
+  # Validation policies
+  validate_all_inputs: true
+  enforce_rate_limits: true
+  require_tls_for_http: true
+  
+  # Logging policies
+  log_security_events: true
+  log_authentication_failures: true
+  
+  # Emergency procedures
+  emergency:
+    disable_all_http: true
+    enable_security_lockdown: false
+    contact: "security@company.com"
+
+# 📋 LOGGING CONFIGURATION
+logging:
+  level: "info"
+  format: "json"
+  output: "/app/logs/distsqlite-secure.log"
+  
+  # Security-focused logging
+  security_log:
+    enabled: true
+    file: "/app/logs/security.log"
+    format: "json"
+    rotation:
+      max_size: "100MB"
+      max_files: 10
+      compress: true
+  
+  # Audit logging
+  audit:
+    enabled: true
+    file: "/app/logs/audit.log"
+    events:
+      - "lease_acquire"
+      - "lease_release"
+      - "authentication"
+      - "authorization"
+      - "wal_replication"
+
+# 🔧 PERFORMANCE WITH SECURITY
+performance:
+  # Optimized for security
+  connection_pool:
+    max_connections: 100
+    idle_timeout: "5m"
+    max_lifetime: "1h"
+  
+  # ZMQ performance
+  zmq_performance:
+    io_threads: 2
+    socket_options:
+      ZMQ_SNDHWM: 1000
+      ZMQ_RCVHWM: 1000
+      ZMQ_LINGER: 0
+      ZMQ_RECONNECT_IVL: 1000
+      ZMQ_RECONNECT_IVL_MAX: 10000
+
+# 🌐 NETWORK SECURITY
+network:
+  # Firewall rules (for reference)
+  allowed_ports:
+    - "5555/tcp"  # ZMQ coordinator
+    - "5558/tcp"  # ZMQ lease server
+    - "5565/tcp"  # ZMQ WAL replication
+    - "9090/tcp"  # Metrics (authenticated)
+  
+  # Block all other traffic
+  default_policy: "deny"
+  
+  # IP restrictions
+  ip_restrictions:
+    coordinator:
+      allowed_networks:
+        - "10.0.0.0/8"
+        - "172.16.0.0/12"
+        - "192.168.0.0/16"
+    
+    metrics:
+      allowed_networks:
+        - "127.0.0.1/32"
+        - "10.0.0.0/8"
+
+# 🔐 ENVIRONMENT VARIABLES REQUIRED
+# The following environment variables MUST be set for secure operation:
+#
+# ZMQ_SERVER_PUBLIC_KEY=<40-char Z85 encoded public key>
+# ZMQ_SERVER_SECRET_KEY=<40-char Z85 encoded secret key>
+# ZMQ_CLIENT_PUBLIC_KEY_1=<40-char Z85 encoded client public key>
+# ZMQ_CLIENT_PUBLIC_KEY_2=<40-char Z85 encoded client public key>
+# DISTSQLITE_API_TOKEN=<secure random token for HTTP API>
+# COORDINATOR_HOST=<coordinator hostname>
+# LEASE_SERVER_HOST=<lease server hostname>
+#
+# GENERATE KEYS WITH:
+# zmq_curve_keypair
+
+# 🎯 DEPLOYMENT CHECKLIST
+# 
+# Before deploying to production:
+# ✅ Generate unique CURVE keypairs
+# ✅ Set all required environment variables
+# ✅ Configure firewall rules
+# ✅ Set up monitoring and alerting
+# ✅ Test security configuration
+# ✅ Verify HTTP endpoints are disabled
+# ✅ Confirm ZMQ CURVE authentication is working
+# ✅ Test failover and recovery procedures

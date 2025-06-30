@@ -197,7 +197,21 @@ func (s *SQLReplayServer) Stop() error {
 }
 
 // handleSQLReplay processes incoming SQL replay batches
+// 🚨 SECURITY: This endpoint is DEPRECATED due to critical SQL injection vulnerabilities
+// Use secure ZMQ WAL replication instead (pkg/replication/wal_zmq_secure.go)
 func (s *SQLReplayServer) handleSQLReplay(w http.ResponseWriter, r *http.Request) {
+	// 🔴 CRITICAL SECURITY: HTTP SQL replay is disabled due to SQL injection vulnerability
+	log.Printf("[SECURITY] Blocked HTTP SQL replay attempt from %s - use ZMQ WAL replication", r.RemoteAddr)
+	
+	http.Error(w, 
+		`{"error": "HTTP SQL replay disabled for security", "reason": "Use ZMQ WAL replication", "code": "SECURITY_BLOCK"}`, 
+		http.StatusForbidden)
+	return
+	
+	// 💀 VULNERABLE CODE DISABLED:
+	// The following code contains CRITICAL SQL injection vulnerabilities
+	// and has been disabled. Use pkg/replication/wal_zmq_secure.go instead.
+	/*
 	if r.Method != http.MethodPOST {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -222,6 +236,7 @@ func (s *SQLReplayServer) handleSQLReplay(w http.ResponseWriter, r *http.Request
 	
 	log.Printf("[SQL Replay Server] Applied %d statements from batch %s", 
 		len(batch.Statements), batch.BatchID)
+	*/
 }
 
 // applySQLBatch applies a batch of SQL statements in a transaction
@@ -248,8 +263,19 @@ func (s *SQLReplayServer) applySQLBatch(batch SQLReplayBatch) error {
 }
 
 // applySQLStatement applies a single SQL statement
+// 🚨 CRITICAL SECURITY VULNERABILITY: This function is disabled due to SQL injection risk
 func (s *SQLReplayServer) applySQLStatement(tx *sql.Tx, stmt SQLStatement) error {
-	// Basic SQL injection protection - check for dangerous patterns
+	// 🔴 DISABLED: This function contains a CRITICAL SQL injection vulnerability
+	return fmt.Errorf("SQL statement execution disabled for security - SQL injection vulnerability present")
+	
+	// 💀 VULNERABLE CODE (SQL Injection - CVSS 9.8):
+	// The following filtering is completely inadequate and can be bypassed:
+	// - DRO/**/P TABLE (comment injection bypass)
+	// - dr\x6fp table (hex encoding bypass)  
+	// - TRUNCATE (not filtered)
+	// - UPDATE/INSERT attacks (DML injection)
+	// - Union-based SQL injection
+	/*
 	sqlLower := strings.ToLower(strings.TrimSpace(stmt.SQL))
 	if strings.Contains(sqlLower, "drop ") || 
 	   strings.Contains(sqlLower, "create ") ||
@@ -257,7 +283,7 @@ func (s *SQLReplayServer) applySQLStatement(tx *sql.Tx, stmt SQLStatement) error
 		return fmt.Errorf("DDL statements not allowed in SQL replay: %s", stmt.SQL)
 	}
 	
-	// Execute the statement
+	// Execute the statement - VULNERABLE TO SQL INJECTION
 	if len(stmt.Params) > 0 {
 		_, err := tx.Exec(stmt.SQL, stmt.Params...)
 		return err
@@ -265,6 +291,7 @@ func (s *SQLReplayServer) applySQLStatement(tx *sql.Tx, stmt SQLStatement) error
 		_, err := tx.Exec(stmt.SQL)
 		return err
 	}
+	*/
 }
 
 // handleHealth provides health check endpoint
