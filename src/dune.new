@@ -1,0 +1,56 @@
+(library
+ (public_name distsqlite-core)
+ (name distcore)
+ (modules distcore vfs_intercept ipc_socket lock_free_queue binary_diff replication lease_state_machine protocol_constants build_config)
+ (libraries threads unix bigarray-compat)
+ (foreign_stubs
+  (language c)
+  (names distcore_stubs_minimal)
+  (flags -O3 -fPIC -DCAML_NAME_SPACE -std=c99 -Wall -Wextra -Werror
+         -DOCAML_VERSION="\"%{ocaml_version}\""))
+ (c_library_flags -lm -ldl -lpthread))
+
+(rule
+ (target libdistcore.so)
+ (deps 
+  (glob_files *.{cma,cmxa,a})
+  distcore_stubs_minimal.o)
+ (action
+  (run ocamlmklib -o distcore_shared -linkall
+    distcore.cma distcore_stubs_minimal.o
+    -cclib -lm -cclib -ldl -cclib -lpthread)))
+
+(rule
+ (targets distcore_c_interface.h)
+ (deps distcore_stubs_minimal.c)
+ (action
+  (with-stdout-to %{targets}
+   (bash "echo '/* Auto-generated C interface header */'
+echo '#ifndef DISTCORE_C_INTERFACE_H'
+echo '#define DISTCORE_C_INTERFACE_H'
+echo ''
+echo '#include <stdint.h>'
+echo '#include <caml/mlvalues.h>'
+echo ''
+echo '/* Write event C structure */'
+echo 'typedef struct {'
+echo '    char* path;'
+echo '    int64_t offset;'
+echo '    int32_t length;'
+echo '    char* data;'
+echo '    int is_wal;'
+echo '    int64_t fence_token;'
+echo '} write_event_c;'
+echo ''
+echo '/* Core stub functions */'
+echo 'value distcore_write_event_of_c(value v_event_ptr);'
+echo 'value distcore_write_event_to_c(value ml_event, value v_event_ptr);'
+echo 'value distcore_create_bigarray_from_ptr(value v_ptr, value v_len);'
+echo 'value distcore_stubs_init(value unit);'
+echo ''
+echo '#endif /* DISTCORE_C_INTERFACE_H */'"))))
+
+(test
+ (name test_stubs)
+ (modules test_stubs)
+ (libraries distcore alcotest))
