@@ -1,7 +1,6 @@
 package ipc
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
