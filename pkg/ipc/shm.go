@@ -1,3 +1,9 @@
+// DEPRECATED: This file contains the old unsafe shared memory implementation.
+// It has been replaced with the safe socket-based IPC in socket.go.
+// This file is kept for reference only and should not be used.
+
+//go:build ignore
+
 package ipc
 
 import (
