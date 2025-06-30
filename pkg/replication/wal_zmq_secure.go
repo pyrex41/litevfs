@@ -8,8 +8,6 @@ import (
 	"log"
 	"sync"
 	"time"
-
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 // SecureWALReplicator handles secure WAL-based replication via ZMQ
