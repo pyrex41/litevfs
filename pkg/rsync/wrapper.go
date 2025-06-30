@@ -272,3 +272,80 @@ func (w *Wrapper) ValidateDestination(dest string) error {
 	log.Printf("[DistSQLite] Assuming remote destination %s is valid", dest)
 	return nil
 }
+
+// VerifyFile performs a dry-run verification to check if files differ
+func (w *Wrapper) VerifyFile(ctx interface{}, source, dest string) error {
+	// Use rsync's dry-run mode to check for differences
+	rsyncPath, err := w.findRsyncBinary()
+	if err != nil {
+		// Fall back to regular rsync if sqlite3_rsync not available
+		return w.verifyWithRegularRsync(source, dest)
+	}
+	
+	// Build dry-run arguments
+	args := []string{"--dry-run", "--itemize-changes"}
+	
+	// Add compression if specified
+	if w.compression != "" && w.compression != "none" {
+		args = append(args, "--compression", w.compression)
+	}
+	
+	// Add source and destination
+	args = append(args, source, dest)
+	
+	log.Printf("[DistSQLite] Verifying consistency: %s %s", rsyncPath, strings.Join(args, " "))
+	
+	// Execute dry-run
+	cmd := exec.Command(rsyncPath, args...)
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("verification failed: %w", err)
+	}
+	
+	// Check if any differences were found
+	outputStr := string(output)
+	if len(strings.TrimSpace(outputStr)) > 0 {
+		return fmt.Errorf("files differ: %s", outputStr)
+	}
+	
+	return nil
+}
+
+// verifyWithRegularRsync falls back to regular rsync for verification
+func (w *Wrapper) verifyWithRegularRsync(source, dest string) error {
+	// Find regular rsync
+	rsyncPath, err := exec.LookPath("rsync")
+	if err != nil {
+		return fmt.Errorf("neither sqlite3_rsync nor rsync available for verification")
+	}
+	
+	// Use rsync's checksum mode for verification
+	args := []string{
+		"--dry-run",
+		"--checksum",
+		"--itemize-changes",
+		source,
+		dest,
+	}
+	
+	log.Printf("[DistSQLite] Verifying with rsync: %s %s", rsyncPath, strings.Join(args, " "))
+	
+	cmd := exec.Command(rsyncPath, args...)
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("rsync verification failed: %w", err)
+	}
+	
+	// Check if any differences were found
+	outputStr := string(output)
+	if len(strings.TrimSpace(outputStr)) > 0 {
+		return fmt.Errorf("files differ: %s", outputStr)
+	}
+	
+	return nil
+}
+
+// SyncFile is an alias for Sync to match the interface used by the hybrid replicator
+func (w *Wrapper) SyncFile(ctx interface{}, source, dest string) error {
+	return w.Sync(source, dest)
+}

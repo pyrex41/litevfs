@@ -533,6 +533,82 @@ func (s *HTTPRsyncServer) sendError(w http.ResponseWriter, errorMsg string) {
 // sendResponse sends a successful response
 func (s *HTTPRsyncServer) sendResponse(w http.ResponseWriter, msg *HTTPRsyncMessage) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(msg)
+	
+	if err := json.NewEncoder(w).Encode(msg); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
+}
+
+// VerifyConsistency performs a dry-run verification to detect differences without applying changes
+func (c *HTTPRsyncClient) VerifyConsistency(ctx context.Context, originDB, targetURL string) error {
+	// Open origin database
+	db, err := sql.Open("sqlite", originDB+"?mode=ro&cache=shared")
+	if err != nil {
+		return fmt.Errorf("failed to open origin database: %w", err)
+	}
+	defer db.Close()
+	
+	// Get database metadata
+	pageSize, pageCount, err := c.getDatabaseInfo(db)
+	if err != nil {
+		return fmt.Errorf("failed to get database info: %w", err)
+	}
+	
+	// Send verification request
+	verifyMsg := &HTTPRsyncMessage{
+		Type:      "VERIFY_REQUEST",
+		Protocol:  1,
+		PageSize:  pageSize,
+		PageCount: pageCount,
+	}
+	
+	respMsg, err := c.sendMessage(ctx, targetURL, verifyMsg)
+	if err != nil {
+		return fmt.Errorf("failed to send verify request: %w", err)
+	}
+	
+	if respMsg.Type == "REPLICA_ERROR" {
+		return fmt.Errorf("replica error: %s", respMsg.Error)
+	}
+	
+	if respMsg.Type != "VERIFY_READY" {
+		return fmt.Errorf("unexpected response: %s", respMsg.Type)
+	}
+	
+	// Receive page hashes from replica
+	hashes, err := c.receivePageHashes(ctx, targetURL)
+	if err != nil {
+		return fmt.Errorf("failed to receive hashes: %w", err)
+	}
+	
+	// Compare hashes to find differences
+	changedPages, err := c.findChangedPages(db, hashes, pageSize)
+	if err != nil {
+		return fmt.Errorf("failed to find changed pages: %w", err)
+	}
+	
+	// If there are differences, return an error
+	if len(changedPages) > 0 {
+		return fmt.Errorf("consistency check failed: %d pages differ (pages: %v)", 
+			len(changedPages), changedPages)
+	}
+	
+	return nil
+}
+
+// SyncDatabase performs a full sync to repair inconsistencies
+func (c *HTTPRsyncClient) SyncDatabase(ctx context.Context, originDB, targetURL string) error {
+	stats, err := c.HTTPRsyncSync(ctx, originDB, targetURL)
+	if err != nil {
+		return fmt.Errorf("sync failed: %w", err)
+	}
+	
+	// Log repair statistics
+	if stats.ChangedPages > 0 {
+		fmt.Printf("[HTTPRsync] Repair completed: %d pages synced, %d bytes transferred (took %dms)\n",
+			stats.ChangedPages, stats.BytesSent, stats.ElapsedMs)
+	}
+	
+	return nil
 }
