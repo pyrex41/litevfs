@@ -73,7 +73,7 @@ type Server struct {
 	logger       *zap.Logger
 	leaseManager LeaseManager
 	replicator   *replication.HybridReplicator
-	ipcReader    *ipc.SharedMemoryReader
+	ipcServer    *ipc.SocketServer
 	httpServer   *http.Server
 	
 	// Statistics
@@ -196,8 +196,10 @@ func (s *Server) initialize() error {
 	// Initialize replicator
 	s.replicator = replication.NewHybridReplicator(s.config.ReplicationTargets)
 	
-	// Initialize IPC reader
-	s.ipcReader = ipc.NewSharedMemoryReader()
+	// Initialize IPC server
+	ipcConfig := ipc.DefaultSocketConfig()
+	ipcConfig.SocketPath = filepath.Join(s.config.DataDir, "distsqlite.sock")
+	s.ipcServer = ipc.NewSocketServer(ipcConfig)
 	s.setupIPCCallbacks()
 	
 	// Set up HTTP server
@@ -209,7 +211,7 @@ func (s *Server) initialize() error {
 
 func (s *Server) setupIPCCallbacks() {
 	// Handle write events from VFS
-	s.ipcReader.SetWriteCallback(func(event ipc.WriteEvent) error {
+	s.ipcServer.SetWriteCallback(func(event ipc.WriteEvent) error {
 		s.writeEvents++
 		
 		// Only process writes if we're the primary
@@ -238,7 +240,7 @@ func (s *Server) setupIPCCallbacks() {
 	})
 	
 	// Handle batch completion events
-	s.ipcReader.SetBatchCallback(func() error {
+	s.ipcServer.SetBatchCallback(func(event ipc.BatchCompleteEvent) error {
 		s.batchEvents++
 		
 		if !s.leaseManager.IsLeaseHolder() {
@@ -251,12 +253,12 @@ func (s *Server) setupIPCCallbacks() {
 	})
 	
 	// Handle sync events
-	s.ipcReader.SetSyncCallback(func(path string) error {
+	s.ipcServer.SetSyncCallback(func(event ipc.SyncEvent) error {
 		if !s.leaseManager.IsLeaseHolder() {
 			return nil // Not primary, ignore
 		}
 		
-		s.logger.Debug("Database sync event", zap.String("path", path))
+		s.logger.Debug("Database sync event", zap.String("path", event.Path))
 		
 		// Sync events are good replication trigger points
 		// The replication engine will decide the optimal strategy
@@ -265,17 +267,17 @@ func (s *Server) setupIPCCallbacks() {
 	})
 	
 	// Handle truncate events
-	s.ipcReader.SetTruncateCallback(func(path string, size int64) error {
+	s.ipcServer.SetTruncateCallback(func(event ipc.TruncateEvent) error {
 		if !s.leaseManager.IsLeaseHolder() {
 			return nil // Not primary, ignore
 		}
 		
 		s.logger.Info("Database truncated", 
-			zap.String("path", path),
-			zap.Int64("size", size),
+			zap.String("path", event.Path),
+			zap.Int64("size", event.Size),
 		)
 		
-		return s.replicator.RecordChange(path, "truncate", size, nil)
+		return s.replicator.RecordChange(event.Path, "truncate", event.Size, nil)
 	})
 }
 
@@ -287,12 +289,12 @@ func (s *Server) start() error {
 		return fmt.Errorf("failed to start replicator: %w", err)
 	}
 	
-	// Start IPC reader
-	if err := s.ipcReader.Start(); err != nil {
-		s.logger.Warn("Failed to start IPC reader", zap.Error(err))
+	// Start IPC server
+	if err := s.ipcServer.Start(); err != nil {
+		s.logger.Warn("Failed to start IPC server", zap.Error(err))
 		// Continue without IPC - degraded mode
 	} else {
-		s.logger.Info("IPC reader started successfully")
+		s.logger.Info("IPC server started successfully")
 	}
 	
 	// Start HTTP server
@@ -388,7 +390,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	healthy := s.replicator.IsHealthy()
 	
 	// Check if IPC is working
-	ipcHealthy := s.ipcReader != nil
+	ipcHealthy := s.ipcServer != nil
 	
 	if healthy && ipcHealthy {
 		w.WriteHeader(http.StatusOK)
@@ -485,12 +487,12 @@ func (s *Server) handleIPCStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	if s.ipcReader == nil {
-		http.Error(w, "IPC reader not initialized", http.StatusServiceUnavailable)
+	if s.ipcServer == nil {
+		http.Error(w, "IPC server not initialized", http.StatusServiceUnavailable)
 		return
 	}
 	
-	stats := s.ipcReader.GetStats()
+	stats := s.ipcServer.GetStats()
 	
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{
@@ -536,10 +538,10 @@ func (s *Server) shutdown() error {
 		}
 	}
 	
-	// Stop IPC reader
-	if s.ipcReader != nil {
-		if err := s.ipcReader.Stop(); err != nil {
-			s.logger.Error("Failed to stop IPC reader", zap.Error(err))
+	// Stop IPC server
+	if s.ipcServer != nil {
+		if err := s.ipcServer.Stop(); err != nil {
+			s.logger.Error("Failed to stop IPC server", zap.Error(err))
 		}
 	}
 	
